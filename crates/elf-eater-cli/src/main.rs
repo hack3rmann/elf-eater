@@ -5,8 +5,8 @@ use goblin::{
         program_header::{PT_LOAD, ProgramHeader},
     },
 };
-use iced_x86::{Decoder, DecoderOptions, Formatter, NasmFormatter};
-use std::{fs, mem, path::Path, sync::Arc};
+use iced_x86::{Decoder, DecoderOptions, Instruction};
+use std::{collections::HashMap, fs, iter, mem, path::Path, sync::Arc};
 
 fn va_to_file_offset(va: u64, phs: &[ProgramHeader]) -> Option<usize> {
     phs.iter()
@@ -87,17 +87,36 @@ impl DisassemblerContext {
             pt_loads,
         }
     }
+
+    pub fn get_functions_by_name(&self, name: &str) -> impl Iterator<Item = &Sym> {
+        self.functions.iter().filter_map(move |sym| {
+            let this_name = self.elf.data().strtab.get_at(sym.st_name)?;
+            (this_name == name).then_some(sym)
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FunctionInfo {
+    pub instructions: Vec<Instruction>,
 }
 
 fn main() {
     let ctx = DisassemblerContext::read("/home/hack3rmann/Downloads/libclntsh.so.12.1.0");
 
-    let mut formatter = NasmFormatter::new();
-    let mut fmt_buf = String::new();
+    let mut functions = HashMap::<u64, FunctionInfo>::new();
+    let mut function_name_map = HashMap::<String, u64>::new();
+    let mut symbol_map = HashMap::<u64, Sym>::new();
 
     for sym in ctx.functions.iter() {
+        symbol_map.insert(sym.st_value, *sym);
+
         if sym.st_size == 0 {
             continue;
+        }
+
+        if let Some(name) = ctx.elf.data().strtab.get_at(sym.st_name) {
+            function_name_map.insert(name.to_owned(), sym.st_value);
         }
 
         let fn_start = va_to_file_offset(sym.st_value, &ctx.pt_loads).unwrap();
@@ -107,48 +126,14 @@ fn main() {
             Decoder::new(64, &ctx.elf.bytes()[fn_start..fn_end], DecoderOptions::NONE);
         decoder.set_ip(sym.st_value);
 
-        let Some(name) = ctx.elf.data().strtab.get_at(sym.st_name) else {
-            continue;
-        };
+        let instructions =
+            iter::from_fn(|| decoder.can_decode().then(|| decoder.decode())).collect::<Vec<_>>();
 
-        println!("\n-----------------------------");
-        println!("-- FUNCTION {}", name);
-        println!("-----------------------------");
-
-        while decoder.can_decode() {
-            let instruction = decoder.decode();
-
-            fmt_buf.clear();
-            formatter.format(&instruction, &mut fmt_buf);
-
-            print!("{:016x}: ", instruction.ip());
-
-            let mut is_substituted = false;
-
-            if instruction.is_call_near() {
-                let target = instruction.near_branch_target();
-
-                for sym in ctx.functions.iter() {
-                    if sym.st_value.abs_diff(target) > 4 {
-                        continue;
-                    }
-
-                    let Some(name) = ctx.elf.data().strtab.get_at(sym.st_name) else {
-                        continue;
-                    };
-
-                    println!("call {name}");
-
-                    is_substituted = true;
-                    break;
-                }
-            }
-
-            if !is_substituted {
-                println!("{fmt_buf}");
-            }
-        }
-
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        functions.insert(sym.st_value, FunctionInfo { instructions });
     }
+
+    let kglssgi_sym_va = function_name_map["kglssgi"];
+    let kglssgi_sym = symbol_map[&kglssgi_sym_va];
+
+    dbg!(&functions[&kglssgi_sym.st_value]);
 }

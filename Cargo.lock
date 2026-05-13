@@ -7,12 +7,14 @@ name = "elf-eater-analyzer"
 version = "0.1.0"
 dependencies = [
  "goblin",
+ "iced-x86",
 ]
 
 [[package]]
 name = "elf-eater-cli"
 version = "0.1.0"
 dependencies = [
+ "elf-eater-analyzer",
  "goblin",
  "iced-x86",
 ]

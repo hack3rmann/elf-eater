@@ -16,5 +16,7 @@ authors = [
 repository = "https://www.github.com/hack3rmann/elf-eater"
 
 [workspace.dependencies]
+elf-eater-analyzer = { path = "crates/elf-eater-analyzer" }
+elf-eater-cli = { path = "crates/elf-eater-cli" }
 goblin = "0.10.5"
 iced-x86 = "1.21.0"

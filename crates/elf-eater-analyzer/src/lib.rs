@@ -5,10 +5,10 @@ use goblin::{
         program_header::{PT_LOAD, ProgramHeader},
     },
 };
-use iced_x86::{Decoder, DecoderOptions, Instruction};
-use std::{collections::HashMap, fs, iter, mem, path::Path, sync::Arc};
+use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, NasmFormatter};
+use std::{collections::HashMap, fmt::Write, fs, iter, mem, path::Path, sync::Arc};
 
-fn va_to_file_offset(va: u64, phs: &[ProgramHeader]) -> Option<usize> {
+pub fn va_to_file_offset(va: u64, phs: &[ProgramHeader]) -> Option<usize> {
     phs.iter()
         .find(|ph| ph.p_vaddr <= va && va < ph.p_vaddr + ph.p_memsz)
         .map(|ph| (ph.p_offset + (va - ph.p_vaddr)) as usize)
@@ -97,6 +97,36 @@ impl DisassemblerContext {
 }
 
 #[derive(Clone, Debug)]
+pub enum ReferencingInstruction {
+    /// Referencing a named function with stored info
+    FunctionCall { virtual_address: u64 },
+    /// Other
+    Unrecognized(Instruction),
+}
+
+impl ReferencingInstruction {
+    pub fn format(
+        &self,
+        luts: &FunctionLuts,
+        elf: &Elf<'_>,
+        formatter: &mut NasmFormatter,
+        buf: &mut String,
+    ) {
+        match self {
+            ReferencingInstruction::FunctionCall { virtual_address } => {
+                let sym = &luts.symbol_map[virtual_address];
+                let name = elf.strtab.get_at(sym.st_name).unwrap();
+
+                write!(buf, "call {name}").unwrap();
+            }
+            ReferencingInstruction::Unrecognized(instruction) => {
+                formatter.format(instruction, buf);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct FunctionInfo {
     pub instructions: Vec<Instruction>,
 }
@@ -142,5 +172,38 @@ impl FunctionLuts {
             name_map,
             symbol_map,
         }
+    }
+
+    pub fn resolve_references(
+        &self,
+        elf: &Elf<'_>,
+        virtual_address: u64,
+    ) -> Vec<ReferencingInstruction> {
+        let info = &self.infos[&virtual_address];
+
+        // TODO(hack3rmann): handle indirect (rel) calls
+
+        info.instructions
+            .iter()
+            .map(|&instruction| {
+                if !instruction.is_call_near() {
+                    return ReferencingInstruction::Unrecognized(instruction);
+                }
+
+                let target = instruction.near_branch_target();
+
+                let symbol = match self.symbol_map.get(&target) {
+                    Some(s) => s,
+                    None => return ReferencingInstruction::Unrecognized(instruction),
+                };
+
+                match elf.strtab.get_at(symbol.st_name) {
+                    Some(_name) => ReferencingInstruction::FunctionCall {
+                        virtual_address: target,
+                    },
+                    None => ReferencingInstruction::Unrecognized(instruction),
+                }
+            })
+            .collect()
     }
 }

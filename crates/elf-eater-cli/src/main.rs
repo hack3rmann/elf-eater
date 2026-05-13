@@ -1,11 +1,20 @@
-use goblin::Object;
+use goblin::{
+    Object,
+    elf::program_header::{PT_LOAD, ProgramHeader},
+};
 use iced_x86::{Decoder, DecoderOptions, Formatter, Mnemonic, NasmFormatter};
 use std::fs;
 
-fn main() {
-    let buffer = fs::read("/home/hack3rmann/Downloads/libclntsh.so.12.1.0").unwrap();
+fn va_to_file_offset(va: u64, phs: &[ProgramHeader]) -> Option<usize> {
+    phs.iter()
+        .find(|ph| ph.p_vaddr <= va && va < ph.p_vaddr + ph.p_memsz)
+        .map(|ph| (ph.p_offset + (va - ph.p_vaddr)) as usize)
+}
 
-    let Object::Elf(elf) = Object::parse(&buffer).unwrap() else {
+fn main() {
+    let bytes = fs::read("/home/hack3rmann/Downloads/libclntsh.so.12.1.0").unwrap();
+
+    let Object::Elf(elf) = Object::parse(&bytes).unwrap() else {
         panic!()
     };
 
@@ -14,42 +23,34 @@ fn main() {
         .iter()
         .filter(|sym| sym.is_function() && elf.strtab.get_at(sym.st_name).is_some());
 
-    let text_section_header = elf
-        .section_headers
+    let pt_loads = elf
+        .program_headers
         .iter()
-        .find_map(|header| {
-            let name = elf.shdr_strtab.get_at(header.sh_name)?;
-            (name == ".text").then_some(header)
-        })
-        .expect("there's no `.text` section");
-
-    let text_start = text_section_header.sh_offset as usize;
-    let text_len = text_section_header.sh_size as usize;
-    let text_end = text_start + text_len;
-
-    let text_section_bytes = &buffer[text_start..text_end];
-
-    let mut decoder = Decoder::new(64, text_section_bytes, DecoderOptions::NONE);
-    decoder.set_ip(text_section_header.sh_addr);
+        .filter(|h| h.p_type == PT_LOAD && h.is_executable() && h.is_read())
+        .cloned()
+        .collect::<Vec<_>>();
 
     let mut formatter = NasmFormatter::new();
     let mut fmt_buf = String::new();
 
     for sym in functions {
-        if (sym.st_value as usize) < text_start || (sym.st_value as usize) >= text_end {
+        if sym.st_size == 0 {
             continue;
         }
 
-        let offset = match sym.st_value.checked_sub(text_section_header.sh_addr) {
-            Some(v) => v as usize,
-            None => continue,
-        };
+        let fn_start = va_to_file_offset(sym.st_value, &pt_loads).unwrap();
+        let fn_end = fn_start + sym.st_size as usize;
 
-        decoder.set_position(offset).unwrap();
+        let mut decoder = Decoder::new(64, &bytes[fn_start..fn_end], DecoderOptions::NONE);
+        decoder.set_ip(sym.st_value);
 
         let Some(name) = elf.strtab.get_at(sym.st_name) else {
             continue;
         };
+
+        if name != "kokorsc" {
+            continue;
+        }
 
         println!("\n-----------------------------");
         println!("-- FUNCTION {}", name);

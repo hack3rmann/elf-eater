@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/elf-eater-analyzer",
+    "crates/elf-eater-cli",
 ]
 
 [workspace.package]
@@ -16,3 +17,4 @@ repository = "https://www.github.com/hack3rmann/elf-eater"
 
 [workspace.dependencies]
 goblin = "0.10.5"
+iced-x86 = "1.21.0"

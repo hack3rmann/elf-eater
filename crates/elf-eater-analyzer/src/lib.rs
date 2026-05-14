@@ -150,6 +150,7 @@ pub struct FunctionInfo {
 pub struct FunctionLuts {
     pub infos: HashMap<u64, FunctionInfo>,
     pub name_map: BTreeMap<String, u64>,
+    pub dyn_name_map: BTreeMap<String, u64>,
     pub symbol_map: HashMap<u64, SymExt>,
 }
 
@@ -157,6 +158,7 @@ impl FunctionLuts {
     pub fn from_ctx(ctx: &DisassemblerContext) -> Self {
         let mut infos = HashMap::<u64, FunctionInfo>::new();
         let mut name_map = BTreeMap::<String, u64>::new();
+        let mut dyn_name_map = BTreeMap::<String, u64>::new();
         let mut symbol_map = HashMap::<u64, SymExt>::new();
 
         for sym in ctx.functions.iter() {
@@ -212,7 +214,7 @@ impl FunctionLuts {
             );
 
             if let Some(name) = ctx.elf().dynstrtab.get_at(sym.st_name) {
-                name_map.insert(name.to_owned(), plt_va);
+                dyn_name_map.insert(name.to_owned(), plt_va);
             }
 
             let fn_start = va_to_file_offset(plt_va, &ctx.pt_loads).unwrap();
@@ -231,6 +233,7 @@ impl FunctionLuts {
         Self {
             infos,
             name_map,
+            dyn_name_map,
             symbol_map,
         }
     }

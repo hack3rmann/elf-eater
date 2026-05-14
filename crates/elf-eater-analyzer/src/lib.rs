@@ -349,10 +349,11 @@ impl FunctionLuts {
         &self,
         elf: &Elf<'_>,
         virtual_address: u64,
-    ) -> Vec<ReferencingInstruction> {
-        let info = &self.infos[&virtual_address];
+    ) -> Option<Vec<ReferencingInstruction>> {
+        let info = &self.infos.get(&virtual_address)?;
 
-        info.instructions
+        let instructions = info
+            .instructions
             .iter()
             .map(|&instruction| {
                 if !instruction.is_call_near() {
@@ -365,6 +366,8 @@ impl FunctionLuts {
                     self.rewrite_regular_call_instruction(elf, instruction)
                 }
             })
-            .collect()
+            .collect();
+
+        Some(instructions)
     }
 }

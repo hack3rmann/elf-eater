@@ -12,3 +12,4 @@ goblin.workspace = true
 iced-x86.workspace = true
 elf-eater-analyzer.workspace = true
 smallvec.workspace = true
+petgraph.workspace = true

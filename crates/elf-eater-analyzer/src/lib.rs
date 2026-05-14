@@ -212,7 +212,7 @@ impl FunctionLuts {
             );
 
             if let Some(name) = ctx.elf().dynstrtab.get_at(sym.st_name) {
-                name_map.insert(name.to_owned(), sym.st_value);
+                name_map.insert(name.to_owned(), plt_va);
             }
         }
 

@@ -1,4 +1,7 @@
-use elf_eater_analyzer::{DisassemblerContext, FunctionLuts, ReferencingInstruction, SymType};
+use elf_eater_analyzer::{
+    asm::passes::references::{FunctionLuts, ReferencingInstruction, SymType},
+    context::DisassemblerContext,
+};
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 fn walk_references(
@@ -80,7 +83,7 @@ fn walk_references(
 
 fn main() {
     let ctx = DisassemblerContext::read("/home/hack3rmann/Downloads/libclntsh.so.12.1.0");
-    let function_luts = FunctionLuts::from_ctx(&ctx);
+    let function_luts = FunctionLuts::new(&ctx);
 
     let name = "kgumini";
     let sym_va = function_luts.name_map[name];

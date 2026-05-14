@@ -214,6 +214,18 @@ impl FunctionLuts {
             if let Some(name) = ctx.elf().dynstrtab.get_at(sym.st_name) {
                 name_map.insert(name.to_owned(), plt_va);
             }
+
+            let fn_start = va_to_file_offset(plt_va, &ctx.pt_loads).unwrap();
+            let fn_end = fn_start + 16;
+
+            let mut decoder =
+                Decoder::new(64, &ctx.bytes()[fn_start..fn_end], DecoderOptions::NONE);
+            decoder.set_ip(plt_va);
+
+            let instructions = iter::from_fn(|| decoder.can_decode().then(|| decoder.decode()))
+                .collect::<Vec<_>>();
+
+            infos.insert(plt_va, FunctionInfo { instructions });
         }
 
         Self {

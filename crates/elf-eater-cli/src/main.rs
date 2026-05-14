@@ -8,7 +8,7 @@ fn main() {
     for (name, &sym_va) in &function_luts.name_map {
         let sym = function_luts.symbol_map[&sym_va];
 
-        let instructions = function_luts.resolve_references(ctx.elf.data(), sym.st_value);
+        let instructions = function_luts.resolve_references(ctx.elf(), sym.sym.st_value);
         let mut formatter = NasmFormatter::new();
         let mut buf = String::new();
 
@@ -23,7 +23,7 @@ fn main() {
 
         for instruction in instructions.iter() {
             buf.clear();
-            instruction.format(&function_luts, ctx.elf.data(), &mut formatter, &mut buf);
+            instruction.format(&function_luts, ctx.elf(), &mut formatter, &mut buf);
 
             println!("{buf}");
         }

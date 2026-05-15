@@ -67,6 +67,18 @@ pub enum SemanticInstruction {
         address: u64,
         ty: ConditionalType,
     },
+    /// `test left, right`
+    Test {
+        size: PointerSize,
+        left: Operand,
+        right: Operand,
+    },
+    /// `cmp left, right`
+    Cmp {
+        size: PointerSize,
+        left: Operand,
+        right: Operand,
+    },
     /// `push 42`
     PushConst {
         value: u64,
@@ -166,6 +178,22 @@ impl SemanticInstruction {
             SemanticInstruction::ConditionalJump { address, ty } => {
                 write!(buf, "j{ty} 0x{address:x}").unwrap();
             }
+            SemanticInstruction::Test {
+                size: _,
+                left,
+                right,
+            } => {
+                // TODO(hack3rmann): register sizes
+                write!(buf, "test {left}, {right}").unwrap();
+            }
+            SemanticInstruction::Cmp {
+                size: _,
+                left,
+                right,
+            } => {
+                // TODO(hack3rmann): register sizes
+                write!(buf, "cmp {left}, {right}").unwrap();
+            }
             SemanticInstruction::PushConst { value } => {
                 write!(buf, "push {value}").unwrap();
             }
@@ -211,6 +239,8 @@ impl From<Instruction> for SemanticInstruction {
             .or_else(|| lift_jump(instr))
             .or_else(|| lift_jcc(instr))
             .or_else(|| lift_binary_op(instr))
+            .or_else(|| lift_test(instr))
+            .or_else(|| lift_cmp(instr))
             .unwrap_or(SemanticInstruction::Other(instr))
     }
 }
@@ -883,5 +913,29 @@ fn lift_binary_op(instr: Instruction) -> Option<SemanticInstruction> {
         destination: lift_reg_or_mem(&instr, 0)?,
         left: lift_operand(&instr, 1)?,
         right: lift_operand(&instr, 2)?,
+    })
+}
+
+fn lift_cmp(instr: Instruction) -> Option<SemanticInstruction> {
+    if instr.mnemonic() != Mnemonic::Cmp {
+        return None;
+    }
+
+    Some(SemanticInstruction::Cmp {
+        size: PointerSize::Qword,
+        left: lift_operand(&instr, 0)?,
+        right: lift_operand(&instr, 1)?,
+    })
+}
+
+fn lift_test(instr: Instruction) -> Option<SemanticInstruction> {
+    if instr.mnemonic() != Mnemonic::Test {
+        return None;
+    }
+
+    Some(SemanticInstruction::Test {
+        size: PointerSize::Qword,
+        left: lift_operand(&instr, 0)?,
+        right: lift_operand(&instr, 1)?,
     })
 }

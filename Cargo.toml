@@ -22,3 +22,4 @@ goblin = "0.10.5"
 iced-x86 = "1.21.0"
 smallvec = { version = "1.15.1", features = ["union", "const_generics", "const_new"] }
 petgraph = { version = "0.8.3", features = ["std"] }
+bitflags = "2.11.1"

@@ -11,7 +11,7 @@ pub enum CodeBlockTerminator {
     },
     InternalJump {
         instruction_index: u32,
-        block_index: u32,
+        block_index: BlockIndex,
         address: u64,
     },
     IndirectJump {
@@ -27,12 +27,29 @@ pub enum CodeBlockTerminator {
 pub struct CodeBlock {
     pub instruction_slice: Range<u32>,
     pub terminator: Option<CodeBlockTerminator>,
-    pub fallthrough_to: Option<u32>,
+    pub fallthrough_to: Option<BlockIndex>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+impl CodeBlock {
+    pub fn range(&self) -> Range<usize> {
+        Range {
+            start: self.instruction_slice.start as usize,
+            end: self.instruction_slice.end as usize,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlockIndex(pub u32);
+
+impl BlockIndex {
+    const INVALID: Self = Self(u32::MAX);
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FunctionCodeFlow {
     pub blocks: Vec<CodeBlock>,
+    pub index_to_block: HashMap<u32, BlockIndex>,
 }
 
 impl FunctionCodeFlow {
@@ -56,22 +73,20 @@ impl FunctionCodeFlow {
             }
         }
 
-        const INVALID_BLOCK: u32 = u32::MAX;
-
         let mut block_start = 0_u32;
         let mut blocks = Vec::new();
-        let mut index_to_block = HashMap::<u32, u32>::new();
+        let mut index_to_block = HashMap::<u32, BlockIndex>::new();
 
         for (&instruction, i) in info.instructions.iter().zip(0_u32..) {
             if referenced_instructions.contains(&i) {
                 if block_start != i {
                     let block_index = blocks.len() as u32;
-                    index_to_block.insert(block_start, block_index);
+                    index_to_block.insert(block_start, BlockIndex(block_index));
 
                     blocks.push(CodeBlock {
                         instruction_slice: block_start..i,
                         terminator: None,
-                        fallthrough_to: Some(i),
+                        fallthrough_to: Some(BlockIndex(i)),
                     });
                 }
 
@@ -81,7 +96,7 @@ impl FunctionCodeFlow {
             match instruction {
                 SemanticInstruction::Return | SemanticInstruction::ReturnClear { amount: _ } => {
                     let block_index = blocks.len() as u32;
-                    index_to_block.insert(block_start, block_index);
+                    index_to_block.insert(block_start, BlockIndex(block_index));
 
                     blocks.push(CodeBlock {
                         instruction_slice: block_start..i + 1,
@@ -94,7 +109,7 @@ impl FunctionCodeFlow {
                 SemanticInstruction::IndirectJumpReg { register: _ }
                 | SemanticInstruction::IndirectJumpMem { expr: _ } => {
                     let block_index = blocks.len() as u32;
-                    index_to_block.insert(block_start, block_index);
+                    index_to_block.insert(block_start, BlockIndex(block_index));
 
                     blocks.push(CodeBlock {
                         instruction_slice: block_start..i + 1,
@@ -108,7 +123,7 @@ impl FunctionCodeFlow {
                     let term = if fn_address <= address && address < function_end {
                         CodeBlockTerminator::InternalJump {
                             instruction_index: i,
-                            block_index: INVALID_BLOCK,
+                            block_index: BlockIndex::INVALID,
                             address,
                         }
                     } else {
@@ -119,7 +134,7 @@ impl FunctionCodeFlow {
                     };
 
                     let block_index = blocks.len() as u32;
-                    index_to_block.insert(block_start, block_index);
+                    index_to_block.insert(block_start, BlockIndex(block_index));
 
                     blocks.push(CodeBlock {
                         instruction_slice: block_start..i + 1,
@@ -131,7 +146,7 @@ impl FunctionCodeFlow {
                     let term = if fn_address <= address && address < function_end {
                         CodeBlockTerminator::InternalJump {
                             instruction_index: i,
-                            block_index: INVALID_BLOCK,
+                            block_index: BlockIndex::INVALID,
                             address,
                         }
                     } else {
@@ -142,13 +157,13 @@ impl FunctionCodeFlow {
                     };
 
                     let block_index = blocks.len() as u32;
-                    index_to_block.insert(block_start, block_index);
+                    index_to_block.insert(block_start, BlockIndex(block_index));
 
                     blocks.push(CodeBlock {
                         instruction_slice: block_start..i + 1,
                         terminator: Some(term),
                         // Store instruction's index temporary
-                        fallthrough_to: Some(i + 1),
+                        fallthrough_to: Some(BlockIndex(i + 1)),
                     });
                 }
                 _ => continue,
@@ -169,10 +184,13 @@ impl FunctionCodeFlow {
             }
 
             if let Some(to) = &mut block.fallthrough_to {
-                *to = index_to_block[to];
+                *to = index_to_block[&to.0];
             }
         }
 
-        Self { blocks }
+        Self {
+            blocks,
+            index_to_block,
+        }
     }
 }

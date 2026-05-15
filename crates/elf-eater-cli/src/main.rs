@@ -1,6 +1,6 @@
 use elf_eater_analyzer::{
     asm::passes::{
-        code_flow::FunctionCodeFlow,
+        code_flow::{BlockIndex, CodeBlockTerminator, FunctionCodeFlow},
         references::{FunctionLuts, ReferencingInstruction, SymType},
     },
     context::DisassemblerContext,
@@ -117,22 +117,49 @@ fn main() {
         },
     );
 
-    // let name = "kghfnd";
-    let name = "qctdccso";
+    let name = "kghfnd";
+    // let name = "qctdccso";
     let sym_va = function_luts.name_map[name];
     let info = &function_luts.infos[&sym_va];
 
     let mut formatter = NasmFormatter::new();
     let mut buf = String::new();
 
-    for (i, instruction) in info.instructions.iter().enumerate() {
-        buf.clear();
-        instruction.format(&mut formatter, &mut buf);
-
-        println!("{i}: {buf}");
-    }
-
     let code_flow = FunctionCodeFlow::new(&function_luts, sym_va);
 
-    dbg!(code_flow);
+    println!("fn {name} {{");
+
+    for (i, block) in code_flow.blocks.iter().enumerate() {
+        println!("    block_{i} {{");
+
+        for instruction in &info.instructions[block.range()] {
+            buf.clear();
+            instruction.format(&mut formatter, &mut buf);
+
+            println!("        {buf}");
+        }
+
+        match (block.terminator, block.fallthrough_to) {
+            (None, Some(BlockIndex(index)))
+            | (
+                Some(CodeBlockTerminator::InternalJump {
+                    block_index: BlockIndex(index),
+                    ..
+                }),
+                None,
+            ) => println!("        goto block_{index}"),
+            (
+                Some(CodeBlockTerminator::InternalJump {
+                    block_index: BlockIndex(true_index),
+                    ..
+                }),
+                Some(BlockIndex(false_index)),
+            ) => println!("        branch block_{true_index}, block_{false_index}"),
+            _ => {}
+        }
+
+        println!("    }}");
+    }
+
+    println!("}}");
 }

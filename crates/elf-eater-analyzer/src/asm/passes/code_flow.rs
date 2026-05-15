@@ -9,9 +9,6 @@ pub enum CodeBlockTerminator {
     Return {
         instruction_index: u32,
     },
-    ThunkJump {
-        block_index: u32,
-    },
     InternalJump {
         instruction_index: u32,
         block_index: u32,

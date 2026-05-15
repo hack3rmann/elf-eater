@@ -447,12 +447,11 @@ pub enum MemoryExpression {
 
 impl Display for MemoryExpression {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let format_displacement = |f: &mut fmt::Formatter<'_>, displacement: i64| {
-            if displacement < 0 {
-                write!(f, " - 0x{:x}]", (-displacement) as u64)
-            } else {
-                write!(f, " + 0x{displacement:x}]")
-            }
+        let format_displacement = |f: &mut fmt::Formatter<'_>, displacement: i64| match displacement
+        {
+            0 => f.write_str("]"),
+            ..0 => write!(f, " - 0x{:x}]", (-displacement) as u64),
+            1.. => write!(f, " + 0x{displacement:x}]"),
         };
 
         match self {

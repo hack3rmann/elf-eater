@@ -1,4 +1,7 @@
-use crate::asm::passes::{references::FunctionLuts, semantic::SemanticInstruction};
+use crate::asm::passes::{
+    references::{FunctionInfo, FunctionLuts},
+    semantic::SemanticInstruction,
+};
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
@@ -192,5 +195,10 @@ impl FunctionCodeFlow {
             blocks,
             index_to_block,
         }
+    }
+
+    pub fn address_to_index(&self, info: &FunctionInfo, address: u64) -> Option<BlockIndex> {
+        let instruction_index = *info.address_map.get(&address)? as u32;
+        self.index_to_block.get(&instruction_index).copied()
     }
 }

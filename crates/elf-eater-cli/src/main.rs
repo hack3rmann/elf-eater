@@ -147,14 +147,14 @@ fn main() {
                     ..
                 }),
                 None,
-            ) => println!("        goto block_{index}"),
+            ) => println!("        ; goto block_{index}"),
             (
                 Some(CodeBlockTerminator::InternalJump {
                     block_index: BlockIndex(true_index),
                     ..
                 }),
                 Some(BlockIndex(false_index)),
-            ) => println!("        branch block_{true_index}, block_{false_index}"),
+            ) => println!("        ; branch block_{true_index}, block_{false_index}"),
             _ => {}
         }
 

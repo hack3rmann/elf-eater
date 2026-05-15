@@ -411,16 +411,24 @@ pub enum MemoryScale {
     Eight = 8,
 }
 
-impl Display for MemoryScale {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let str = match self {
+impl MemoryScale {
+    pub const fn as_str(self) -> &'static str {
+        match self {
             MemoryScale::One => "1",
             MemoryScale::Two => "2",
             MemoryScale::Four => "4",
             MemoryScale::Eight => "8",
-        };
+        }
+    }
 
-        f.write_str(str)
+    pub const fn value(self) -> u8 {
+        self as u8
+    }
+}
+
+impl Display for MemoryScale {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -454,7 +462,12 @@ impl Display for MemoryExpression {
                 scale,
                 displacement,
             } => {
-                write!(f, "[{base} + {index} * {scale}")?;
+                if *scale == MemoryScale::One {
+                    write!(f, "[{base} + {index}")?;
+                } else {
+                    write!(f, "[{base} + {index} * {scale}")?;
+                }
+
                 format_displacement(f, *displacement)
             }
             MemoryExpression::Absolute {
@@ -463,7 +476,12 @@ impl Display for MemoryExpression {
                 scale,
                 displacement,
             } => {
-                write!(f, "[{index} * {scale}")?;
+                if *scale == MemoryScale::One {
+                    write!(f, "[{index}")?;
+                } else {
+                    write!(f, "[{index} * {scale}")?;
+                }
+
                 format_displacement(f, *displacement)
             }
             MemoryExpression::Absolute {

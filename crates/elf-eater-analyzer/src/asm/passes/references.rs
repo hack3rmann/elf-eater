@@ -1,6 +1,12 @@
-use crate::{asm::va_to_file_offset, context::DisassemblerContext};
+use crate::{
+    asm::{
+        passes::semantic::{MemoryExpression, SemanticInstruction},
+        va_to_file_offset,
+    },
+    context::DisassemblerContext,
+};
 use goblin::elf::{Elf, Reloc, Sym};
-use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, NasmFormatter, OpKind, Register};
+use iced_x86::{Decoder, DecoderOptions, NasmFormatter};
 use std::{
     collections::{BTreeMap, HashMap},
     fmt::Write,
@@ -28,7 +34,7 @@ pub enum ReferencingInstruction {
     /// Referencing an unnamed function via plt
     UnresolvedPltFunctionCall { plt_virtual_address: u64 },
     /// Other
-    Unrecognized(Instruction),
+    Unrecognized(SemanticInstruction),
 }
 
 impl ReferencingInstruction {
@@ -72,7 +78,7 @@ impl ReferencingInstruction {
                 write!(buf, "call unresolved @ plt[{plt_virtual_address:X}h]").unwrap();
             }
             ReferencingInstruction::Unrecognized(instruction) => {
-                formatter.format(instruction, buf);
+                instruction.format(formatter, buf);
             }
         }
     }
@@ -93,7 +99,7 @@ pub struct SymExt {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FunctionInfo {
-    pub instructions: Vec<Instruction>,
+    pub instructions: Vec<SemanticInstruction>,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -138,6 +144,7 @@ impl FunctionLuts {
             decoder.set_ip(sym.st_value);
 
             let instructions = iter::from_fn(|| decoder.can_decode().then(|| decoder.decode()))
+                .map(SemanticInstruction::from)
                 .collect::<Vec<_>>();
 
             infos.insert(sym.st_value, FunctionInfo { instructions });
@@ -180,6 +187,7 @@ impl FunctionLuts {
             decoder.set_ip(plt_va);
 
             let instructions = iter::from_fn(|| decoder.can_decode().then(|| decoder.decode()))
+                .map(SemanticInstruction::from)
                 .collect::<Vec<_>>();
 
             infos.insert(plt_va, FunctionInfo { instructions });
@@ -197,9 +205,14 @@ impl FunctionLuts {
     fn rewrite_regular_call_instruction(
         &self,
         elf: &Elf<'_>,
-        instruction: Instruction,
+        instruction: SemanticInstruction,
     ) -> ReferencingInstruction {
-        let virtual_address = instruction.near_branch_target();
+        let SemanticInstruction::DirectCall {
+            address: virtual_address,
+        } = instruction
+        else {
+            unreachable!()
+        };
 
         let symbol = match self.symbol_map.get(&virtual_address) {
             Some(s) => s,
@@ -222,15 +235,28 @@ impl FunctionLuts {
     fn rewrite_plt_call_instruction(
         &self,
         elf: &Elf<'_>,
-        instruction: Instruction,
-        first_instruction: Instruction,
+        instruction: SemanticInstruction,
+        first_instruction: SemanticInstruction,
     ) -> ReferencingInstruction {
-        let call_address = instruction.near_branch_target();
+        let SemanticInstruction::DirectCall {
+            address: call_address,
+        } = instruction
+        else {
+            unreachable!()
+        };
+
         let unresolved = ReferencingInstruction::UnresolvedPltFunctionCall {
             plt_virtual_address: call_address,
         };
 
-        let got_address = first_instruction.ip_rel_memory_address();
+        let SemanticInstruction::IndirectJumpMem {
+            expr: MemoryExpression::Relative {
+                address: got_address,
+            },
+        } = first_instruction
+        else {
+            unreachable!()
+        };
 
         let Some(reloc) = self.got_to_reloc.get(&got_address) else {
             return unresolved;
@@ -246,20 +272,21 @@ impl FunctionLuts {
         }
     }
 
-    fn probably_plt_call(&self, instruction: Instruction) -> Option<Instruction> {
-        if !instruction.is_call_near() {
+    fn probably_plt_call(&self, instruction: SemanticInstruction) -> Option<SemanticInstruction> {
+        let SemanticInstruction::DirectCall { address } = instruction else {
             return None;
-        }
+        };
 
-        let virtual_address = instruction.near_branch_target();
-        let info = self.infos.get(&virtual_address)?;
+        let info = self.infos.get(&address)?;
         let first_instr = info.instructions.first()?;
 
         // jmp qword [rel 0xWHATEVER]
-        (first_instr.is_jmp_near_indirect()
-            && first_instr.op0_kind() == OpKind::Memory
-            && first_instr.memory_base() == Register::RIP)
-            .then_some(*first_instr)
+        Some(match first_instr {
+            SemanticInstruction::IndirectJumpMem {
+                expr: MemoryExpression::Relative { .. },
+            } => *first_instr,
+            _ => return None,
+        })
     }
 
     pub fn resolve_references(
@@ -273,7 +300,7 @@ impl FunctionLuts {
             .instructions
             .iter()
             .map(|&instruction| {
-                if !instruction.is_call_near() {
+                if !matches!(instruction, SemanticInstruction::DirectCall { .. }) {
                     return ReferencingInstruction::Unrecognized(instruction);
                 }
 

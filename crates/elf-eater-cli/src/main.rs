@@ -2,6 +2,7 @@ use elf_eater_analyzer::{
     asm::passes::references::{FunctionLuts, ReferencingInstruction, SymType},
     context::DisassemblerContext,
 };
+use iced_x86::NasmFormatter;
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 fn walk_references(
@@ -89,11 +90,12 @@ fn main() {
     let sym_va = function_luts.name_map[name];
 
     let mut visited = HashSet::new();
+    let mut instruction_map = HashMap::new();
 
     walk_references(
         &ctx,
         &function_luts,
-        &mut HashMap::new(),
+        &mut instruction_map,
         &mut visited,
         sym_va,
         0,
@@ -112,5 +114,17 @@ fn main() {
         },
     );
 
-    dbg!(visited.len());
+    let name = "kghfnd";
+    let sym_va = function_luts.name_map[name];
+    let info = &function_luts.infos[&sym_va];
+
+    let mut formatter = NasmFormatter::new();
+    let mut buf = String::new();
+
+    for instruction in &info.instructions {
+        buf.clear();
+        instruction.format(&mut formatter, &mut buf);
+
+        println!("{buf}");
+    }
 }

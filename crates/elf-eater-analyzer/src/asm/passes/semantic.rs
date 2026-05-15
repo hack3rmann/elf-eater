@@ -1,4 +1,5 @@
-use iced_x86::{Instruction, Mnemonic, OpKind, Register};
+use iced_x86::{Formatter, Instruction, Mnemonic, NasmFormatter, OpKind, Register};
+use std::fmt::{self, Display};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SemanticInstruction {
@@ -45,6 +46,7 @@ pub enum SemanticInstruction {
     },
     /// `xchg destination, source`
     Exchange {
+        size: PointerSize,
         first: RegOrMemory,
         second: RegOrMemory,
     },
@@ -63,7 +65,7 @@ pub enum SemanticInstruction {
     /// `jcc 0xWHATEVER`
     ConditionalJump {
         address: i64,
-        ty: ConditionalJumpType,
+        ty: ConditionalType,
     },
     /// `push 42`
     PushConst {
@@ -96,9 +98,105 @@ pub enum SemanticInstruction {
         kind: UnaryOpKind,
         operand: RegOrMemory,
     },
-    /// CFG-form end of a block
-    BlockTerminator,
     Other(Instruction),
+}
+
+impl SemanticInstruction {
+    pub fn format(&self, formatter: &mut NasmFormatter, buf: &mut String) {
+        use std::fmt::Write;
+
+        match self {
+            SemanticInstruction::DirectCall { address } => {
+                write!(buf, "call 0x{address:x}").unwrap();
+            }
+            SemanticInstruction::IndirectCallReg { register } => {
+                write!(buf, "call {register}").unwrap();
+            }
+            SemanticInstruction::IndirectCallMem { expr } => {
+                write!(buf, "call qword {expr}").unwrap();
+            }
+            SemanticInstruction::Return => {
+                buf.write_str("ret").unwrap();
+            }
+            SemanticInstruction::ReturnClear { amount } => {
+                write!(buf, "ret 0x{amount:x}").unwrap();
+            }
+            SemanticInstruction::Load {
+                size,
+                destination,
+                source,
+            } => {
+                write!(buf, "mov {destination}, {size} {source}").unwrap();
+            }
+            SemanticInstruction::Store {
+                size,
+                destination,
+                source,
+            } => {
+                write!(buf, "mov {size} {destination}, {source}").unwrap();
+            }
+            SemanticInstruction::Assignment {
+                size: _,
+                destination,
+                source,
+            } => {
+                // FIXME(hack3rmann): handle size
+                write!(buf, "mov {destination}, {source}").unwrap();
+            }
+            SemanticInstruction::LoadAddress { destination, expr } => {
+                write!(buf, "lea {destination}, {expr}").unwrap();
+            }
+            SemanticInstruction::Exchange {
+                size: _,
+                first,
+                second,
+            } => {
+                // FIXME(hack3rmann): handle size
+                write!(buf, "xchg {first}, {second}").unwrap();
+            }
+            SemanticInstruction::DirectJump { address } => {
+                write!(buf, "jmp 0x{address:x}").unwrap();
+            }
+            SemanticInstruction::IndirectJumpReg { register } => {
+                write!(buf, "jmp {register}").unwrap();
+            }
+            SemanticInstruction::IndirectJumpMem { expr } => {
+                write!(buf, "jmp qword {expr}").unwrap();
+            }
+            SemanticInstruction::ConditionalJump { address, ty } => {
+                write!(buf, "j{ty} 0x{address:x}").unwrap();
+            }
+            SemanticInstruction::PushConst { value } => {
+                write!(buf, "push {value}").unwrap();
+            }
+            SemanticInstruction::PushReg { reg } => {
+                write!(buf, "push {reg}").unwrap();
+            }
+            SemanticInstruction::PushMem { expr } => {
+                write!(buf, "push qword {expr}").unwrap();
+            }
+            SemanticInstruction::PopReg { reg } => {
+                write!(buf, "pop {reg}").unwrap();
+            }
+            SemanticInstruction::PopMem { expr } => {
+                write!(buf, "pop {expr}").unwrap();
+            }
+            SemanticInstruction::BinaryOp {
+                kind,
+                destination,
+                left,
+                right,
+            } => {
+                write!(buf, "{kind} {destination}, {left}, {right}").unwrap();
+            }
+            SemanticInstruction::UnaryOp { kind, operand } => {
+                write!(buf, "{kind} {operand}").unwrap();
+            }
+            SemanticInstruction::Other(instruction) => {
+                formatter.format(instruction, buf);
+            }
+        }
+    }
 }
 
 impl From<Instruction> for SemanticInstruction {
@@ -131,6 +229,28 @@ pub enum BinaryOpKind {
     Shr,
 }
 
+impl BinaryOpKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            BinaryOpKind::Add => "add",
+            BinaryOpKind::Sub => "sub",
+            BinaryOpKind::Mul => "mul",
+            BinaryOpKind::Imul => "imul",
+            BinaryOpKind::Xor => "xor",
+            BinaryOpKind::And => "and",
+            BinaryOpKind::Or => "or",
+            BinaryOpKind::Shl => "shl",
+            BinaryOpKind::Shr => "shr",
+        }
+    }
+}
+
+impl Display for BinaryOpKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ExtendedBinaryOpKind {
     #[default]
@@ -149,10 +269,36 @@ pub enum UnaryOpKind {
     Dec,
 }
 
+impl UnaryOpKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            UnaryOpKind::Neg => "neg",
+            UnaryOpKind::Inv => "inv",
+            UnaryOpKind::Inc => "inc",
+            UnaryOpKind::Dec => "dec",
+        }
+    }
+}
+
+impl Display for UnaryOpKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RegOrMemory {
     Reg(GpRegister),
     Mem(MemoryExpression),
+}
+
+impl Display for RegOrMemory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RegOrMemory::Reg(gp_register) => gp_register.fmt(f),
+            RegOrMemory::Mem(memory_expression) => memory_expression.fmt(f),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -162,8 +308,18 @@ pub enum Operand {
     Const(u64),
 }
 
+impl Display for Operand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Operand::Register(gp_register) => gp_register.fmt(f),
+            Operand::Memory(memory_expression) => memory_expression.fmt(f),
+            Operand::Const(value) => write!(f, "0x{value:x}"),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ConditionalJumpType {
+pub enum ConditionalType {
     #[default]
     Equal,
     NotEqual,
@@ -183,6 +339,35 @@ pub enum ConditionalJumpType {
     ParityOdd,
 }
 
+impl ConditionalType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ConditionalType::Equal => "e",
+            ConditionalType::NotEqual => "ne",
+            ConditionalType::Below => "b",
+            ConditionalType::BelowOrEqual => "be",
+            ConditionalType::Above => "a",
+            ConditionalType::AboveOrEqual => "ae",
+            ConditionalType::Less => "l",
+            ConditionalType::LessOrEqual => "le",
+            ConditionalType::Greater => "g",
+            ConditionalType::GreaterOrEqaual => "ge",
+            ConditionalType::Overflow => "o",
+            ConditionalType::NoOverflow => "no",
+            ConditionalType::Negative => "s",
+            ConditionalType::NonNegative => "ns",
+            ConditionalType::ParityEven => "p",
+            ConditionalType::ParityOdd => "np",
+        }
+    }
+}
+
+impl Display for ConditionalType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PointerSize {
     Byte = 1,
@@ -196,6 +381,27 @@ pub enum PointerSize {
     ZmmWord = 64,
 }
 
+impl PointerSize {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PointerSize::Byte => "byte",
+            PointerSize::Word => "word",
+            PointerSize::Dword => "dword",
+            PointerSize::Qword => "qword",
+            PointerSize::Tword => "tword",
+            PointerSize::XmmWord => "xmmword",
+            PointerSize::YmmWord => "ymmword",
+            PointerSize::ZmmWord => "zmmword",
+        }
+    }
+}
+
+impl Display for PointerSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MemoryScale {
     #[default]
@@ -205,17 +411,83 @@ pub enum MemoryScale {
     Eight = 8,
 }
 
+impl Display for MemoryScale {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let str = match self {
+            MemoryScale::One => "1",
+            MemoryScale::Two => "2",
+            MemoryScale::Four => "4",
+            MemoryScale::Eight => "8",
+        };
+
+        f.write_str(str)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MemoryExpression {
     /// `[base + index * scale + displacement]`
     Absolute {
         base: Option<GpRegister>,
-        index: Option<GpNotRspRegister>,
+        index: Option<GpRegister>,
         scale: MemoryScale,
         displacement: i64,
     },
-    /// `[rip + displacement]` or `size [rel displacement]`
-    Relative { displacement: i64 },
+    /// `[rip + displacement]` or `size [rel displacement]`, where `address = rip + displacement`
+    Relative { address: u64 },
+}
+
+impl Display for MemoryExpression {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let format_displacement = |f: &mut fmt::Formatter<'_>, displacement: i64| {
+            if displacement < 0 {
+                write!(f, " - 0x{:x}]", (-displacement) as u64)
+            } else {
+                write!(f, " + 0x{displacement:x}]")
+            }
+        };
+
+        match self {
+            MemoryExpression::Absolute {
+                base: Some(base),
+                index: Some(index),
+                scale,
+                displacement,
+            } => {
+                write!(f, "[{base} + {index} * {scale}")?;
+                format_displacement(f, *displacement)
+            }
+            MemoryExpression::Absolute {
+                base: None,
+                index: Some(index),
+                scale,
+                displacement,
+            } => {
+                write!(f, "[{index} * {scale}")?;
+                format_displacement(f, *displacement)
+            }
+            MemoryExpression::Absolute {
+                base: Some(base),
+                index: None,
+                scale: _,
+                displacement,
+            } => {
+                write!(f, "[{base}")?;
+                format_displacement(f, *displacement)
+            }
+            MemoryExpression::Absolute {
+                base: None,
+                index: None,
+                scale: _,
+                displacement: address,
+            } => {
+                write!(f, "[0x{address:x}]")
+            }
+            MemoryExpression::Relative { address } => {
+                write!(f, "[rel 0x{address:x} - rip]")
+            }
+        }
+    }
 }
 
 impl From<AbsoluteMemoryExpression> for MemoryExpression {
@@ -232,7 +504,7 @@ impl From<AbsoluteMemoryExpression> for MemoryExpression {
 impl From<RelativeMemoryExpression> for MemoryExpression {
     fn from(value: RelativeMemoryExpression) -> Self {
         Self::Relative {
-            displacement: value.displacement,
+            address: value.address,
         }
     }
 }
@@ -240,7 +512,7 @@ impl From<RelativeMemoryExpression> for MemoryExpression {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AbsoluteMemoryExpression {
     pub base: Option<GpRegister>,
-    pub index: Option<GpNotRspRegister>,
+    pub index: Option<GpRegister>,
     pub scale: MemoryScale,
     pub displacement: i64,
 }
@@ -248,7 +520,7 @@ pub struct AbsoluteMemoryExpression {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RelativeMemoryExpression {
     pub size: Option<PointerSize>,
-    pub displacement: i64,
+    pub address: u64,
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -278,6 +550,35 @@ pub enum GpRegister {
     R15 = 15,
 }
 
+impl GpRegister {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            GpRegister::Rax => "rax",
+            GpRegister::Rbx => "rbx",
+            GpRegister::Rcx => "rcx",
+            GpRegister::Rdx => "rdx",
+            GpRegister::Rsi => "rsi",
+            GpRegister::Rdi => "rdi",
+            GpRegister::Rbp => "rbp",
+            GpRegister::Rsp => "rsp",
+            GpRegister::R8 => "r8",
+            GpRegister::R9 => "r9",
+            GpRegister::R10 => "r10",
+            GpRegister::R11 => "r11",
+            GpRegister::R12 => "r12",
+            GpRegister::R13 => "r13",
+            GpRegister::R14 => "r14",
+            GpRegister::R15 => "r15",
+        }
+    }
+}
+
+impl Display for GpRegister {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl TryFrom<Register> for GpRegister {
     type Error = ();
 
@@ -304,78 +605,10 @@ impl TryFrom<Register> for GpRegister {
     }
 }
 
-impl From<GpNotRspRegister> for GpRegister {
-    fn from(value: GpNotRspRegister) -> Self {
-        match value {
-            GpNotRspRegister::Rax => Self::Rax,
-            GpNotRspRegister::Rbx => Self::Rbx,
-            GpNotRspRegister::Rcx => Self::Rcx,
-            GpNotRspRegister::Rdx => Self::Rdx,
-            GpNotRspRegister::Rsi => Self::Rsi,
-            GpNotRspRegister::Rdi => Self::Rdi,
-            GpNotRspRegister::Rbp => Self::Rbp,
-            GpNotRspRegister::R8 => Self::R8,
-            GpNotRspRegister::R9 => Self::R9,
-            GpNotRspRegister::R10 => Self::R10,
-            GpNotRspRegister::R11 => Self::R11,
-            GpNotRspRegister::R12 => Self::R12,
-            GpNotRspRegister::R13 => Self::R13,
-            GpNotRspRegister::R14 => Self::R14,
-            GpNotRspRegister::R15 => Self::R15,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum GpNotRspRegister {
-    #[default]
-    Rax = 0,
-    Rbx = 1,
-    Rcx = 2,
-    Rdx = 3,
-    Rsi = 4,
-    Rdi = 5,
-    Rbp = 6,
-    // No Rsp
-    R8 = 8,
-    R9 = 9,
-    R10 = 10,
-    R11 = 11,
-    R12 = 12,
-    R13 = 13,
-    R14 = 14,
-    R15 = 15,
-}
-
-impl TryFrom<Register> for GpNotRspRegister {
-    type Error = ();
-
-    fn try_from(reg: Register) -> Result<Self, Self::Error> {
-        match reg.full_register() {
-            Register::RAX => Ok(Self::Rax),
-            Register::RBX => Ok(Self::Rbx),
-            Register::RCX => Ok(Self::Rcx),
-            Register::RDX => Ok(Self::Rdx),
-            Register::RSI => Ok(Self::Rsi),
-            Register::RDI => Ok(Self::Rdi),
-            Register::RBP => Ok(Self::Rbp),
-            Register::R8 => Ok(Self::R8),
-            Register::R9 => Ok(Self::R9),
-            Register::R10 => Ok(Self::R10),
-            Register::R11 => Ok(Self::R11),
-            Register::R12 => Ok(Self::R12),
-            Register::R13 => Ok(Self::R13),
-            Register::R14 => Ok(Self::R14),
-            Register::R15 => Ok(Self::R15),
-            _ => Err(()),
-        }
-    }
-}
-
 fn lift_memory(instr: &Instruction) -> Option<MemoryExpression> {
     if instr.memory_base() == Register::RIP {
         return Some(MemoryExpression::Relative {
-            displacement: instr.memory_displacement64() as i64,
+            address: instr.ip_rel_memory_address(),
         });
     }
 
@@ -386,7 +619,7 @@ fn lift_memory(instr: &Instruction) -> Option<MemoryExpression> {
 
     let index = match instr.memory_index() {
         Register::None => None,
-        r => Some(GpNotRspRegister::try_from(r).ok()?),
+        r => Some(GpRegister::try_from(r).ok()?),
     };
 
     let scale = match instr.memory_index_scale() {
@@ -517,8 +750,8 @@ fn lift_jump(instr: Instruction) -> Option<SemanticInstruction> {
     })
 }
 
-fn lift_jcc_type(mnemonic: Mnemonic) -> Option<ConditionalJumpType> {
-    use ConditionalJumpType::*;
+fn lift_jcc_type(mnemonic: Mnemonic) -> Option<ConditionalType> {
+    use ConditionalType::*;
     use iced_x86::Mnemonic::*;
 
     Some(match mnemonic {
@@ -566,6 +799,8 @@ fn lift_xchg(instr: Instruction) -> Option<SemanticInstruction> {
     }
 
     Some(SemanticInstruction::Exchange {
+        // FIXME(hack3rmann): xchg size
+        size: PointerSize::Qword,
         first: lift_reg_or_mem(&instr, 0)?,
         second: lift_reg_or_mem(&instr, 1)?,
     })

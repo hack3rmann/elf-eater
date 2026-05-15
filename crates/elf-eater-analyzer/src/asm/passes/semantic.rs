@@ -64,7 +64,7 @@ pub enum SemanticInstruction {
     },
     /// `jcc 0xWHATEVER`
     ConditionalJump {
-        address: i64,
+        address: u64,
         ty: ConditionalType,
     },
     /// `push 42`
@@ -794,7 +794,7 @@ fn lift_jcc_type(mnemonic: Mnemonic) -> Option<ConditionalType> {
 
 fn lift_jcc(instr: Instruction) -> Option<SemanticInstruction> {
     Some(SemanticInstruction::ConditionalJump {
-        address: instr.near_branch_target() as i64,
+        address: instr.near_branch_target(),
         ty: lift_jcc_type(instr.mnemonic())?,
     })
 }

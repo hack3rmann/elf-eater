@@ -1,5 +1,8 @@
 use elf_eater_analyzer::{
-    asm::passes::references::{FunctionLuts, ReferencingInstruction, SymType},
+    asm::passes::{
+        code_flow::FunctionCodeFlow,
+        references::{FunctionLuts, ReferencingInstruction, SymType},
+    },
     context::DisassemblerContext,
 };
 use iced_x86::NasmFormatter;
@@ -114,17 +117,22 @@ fn main() {
         },
     );
 
-    let name = "kghfnd";
+    // let name = "kghfnd";
+    let name = "qctdccso";
     let sym_va = function_luts.name_map[name];
     let info = &function_luts.infos[&sym_va];
 
     let mut formatter = NasmFormatter::new();
     let mut buf = String::new();
 
-    for instruction in &info.instructions {
+    for (i, instruction) in info.instructions.iter().enumerate() {
         buf.clear();
         instruction.format(&mut formatter, &mut buf);
 
-        println!("{buf}");
+        println!("{i}: {buf}");
     }
+
+    let code_flow = FunctionCodeFlow::new(&function_luts, sym_va);
+
+    dbg!(code_flow);
 }

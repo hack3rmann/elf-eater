@@ -100,6 +100,34 @@ pub struct SymExt {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FunctionInfo {
     pub instructions: Vec<SemanticInstruction>,
+    pub addresses: Vec<u64>,
+    pub address_map: BTreeMap<u64, usize>,
+}
+
+impl FunctionInfo {
+    pub fn decode_function(address: u64, bytes: &[u8]) -> Self {
+        let mut decoder = Decoder::new(64, bytes, DecoderOptions::NONE);
+        decoder.set_ip(address);
+
+        let mut addresses = Vec::new();
+        let mut address_map = BTreeMap::new();
+
+        let instructions = iter::from_fn(|| decoder.can_decode().then(|| decoder.decode()))
+            .enumerate()
+            .map(|(i, instruction)| {
+                addresses.push(instruction.ip());
+                address_map.insert(instruction.ip(), i);
+                instruction
+            })
+            .map(SemanticInstruction::from)
+            .collect::<Vec<_>>();
+
+        Self {
+            instructions,
+            addresses,
+            address_map,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -138,16 +166,10 @@ impl FunctionLuts {
 
             let fn_start = va_to_file_offset(sym.st_value, &ctx.pt_loads).unwrap();
             let fn_end = fn_start + sym.st_size as usize;
+            let bytes = &ctx.bytes()[fn_start..fn_end];
 
-            let mut decoder =
-                Decoder::new(64, &ctx.bytes()[fn_start..fn_end], DecoderOptions::NONE);
-            decoder.set_ip(sym.st_value);
-
-            let instructions = iter::from_fn(|| decoder.can_decode().then(|| decoder.decode()))
-                .map(SemanticInstruction::from)
-                .collect::<Vec<_>>();
-
-            infos.insert(sym.st_value, FunctionInfo { instructions });
+            let info = FunctionInfo::decode_function(sym.st_value, bytes);
+            infos.insert(sym.st_value, info);
         }
 
         let plt = ctx
@@ -181,16 +203,10 @@ impl FunctionLuts {
 
             let fn_start = va_to_file_offset(plt_va, &ctx.pt_loads).unwrap();
             let fn_end = fn_start + 16;
+            let bytes = &ctx.bytes()[fn_start..fn_end];
 
-            let mut decoder =
-                Decoder::new(64, &ctx.bytes()[fn_start..fn_end], DecoderOptions::NONE);
-            decoder.set_ip(plt_va);
-
-            let instructions = iter::from_fn(|| decoder.can_decode().then(|| decoder.decode()))
-                .map(SemanticInstruction::from)
-                .collect::<Vec<_>>();
-
-            infos.insert(plt_va, FunctionInfo { instructions });
+            let info = FunctionInfo::decode_function(sym.st_value, bytes);
+            infos.insert(sym.st_value, info);
         }
 
         Self {

@@ -389,6 +389,15 @@ impl Display for Operand {
     }
 }
 
+impl From<SizedRegOrMemory> for Operand {
+    fn from(value: SizedRegOrMemory) -> Self {
+        match value {
+            SizedRegOrMemory::Reg(reg) => Self::Register(reg),
+            SizedRegOrMemory::Mem { size: _, expr } => Self::Memory(expr),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ConditionalType {
     #[default]
@@ -1473,6 +1482,7 @@ fn lift_arithmetic(instr: Instruction) -> Option<SemanticInstruction> {
         .or_else(|| lift_shl_shr_sal_sar(instr))
         .or_else(|| lift_rol_ror_rcl_rcr(instr))
         .or_else(|| lift_shld_shrd(instr))
+        .or_else(|| lift_neg(instr))
         .map(SemanticInstruction::Arithmetic)
 }
 
@@ -1525,6 +1535,39 @@ fn lift_add_sub(instr: Instruction) -> Option<ArithmeticInstruction> {
             ..FlagsEffect::NONE
         },
         kind,
+    })
+}
+
+fn lift_neg(instr: Instruction) -> Option<ArithmeticInstruction> {
+    if instr.mnemonic() != Mnemonic::Neg {
+        return None;
+    }
+
+    let result = match instr.op0_kind() {
+        OpKind::Register => SizedRegOrMemory::Reg(GpRegister::try_from(instr.op0_register()).ok()?),
+        OpKind::Memory => SizedRegOrMemory::Mem {
+            size: PointerSize::try_from(instr.memory_size()).ok()?,
+            expr: lift_memory(&instr)?,
+        },
+        _ => return None,
+    };
+
+    Some(ArithmeticInstruction {
+        operands: ArithmeticOperands::ShortExpression {
+            result,
+            left: Operand::Const(0),
+            right: Some(Operand::from(result)),
+        },
+        flags_effect: FlagsEffect {
+            written: Flags::ZERO
+                | Flags::CARRY
+                | Flags::SIGN
+                | Flags::OVERFLOW
+                | Flags::PARITY
+                | Flags::AUXILLIARY_OVERFLOW,
+            ..FlagsEffect::NONE
+        },
+        kind: ArithmeticOpKind::Sub,
     })
 }
 

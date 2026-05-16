@@ -293,6 +293,18 @@ pub struct FlagsEffect {
     pub read: Flags,
     pub written: Flags,
     pub undefined: Flags,
+    pub set_mask: Flags,
+    pub set_values: Flags,
+}
+
+impl FlagsEffect {
+    pub const NONE: Self = Self {
+        read: Flags::empty(),
+        written: Flags::empty(),
+        undefined: Flags::empty(),
+        set_mask: Flags::empty(),
+        set_values: Flags::empty(),
+    };
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -947,9 +959,16 @@ impl Display for ArithmeticInstruction {
             ArithmeticOperands::ShortExpression {
                 result,
                 left,
-                right,
+                right: Some(right),
             } => {
                 write!(f, "{result} = {left} {op} {right}")
+            }
+            ArithmeticOperands::ShortExpression {
+                result,
+                left,
+                right: None,
+            } => {
+                write!(f, "{result} = {op}{left}")
             }
             ArithmeticOperands::ResultExtendedExpression {
                 result_hi,
@@ -980,7 +999,7 @@ pub enum ArithmeticOperands {
     ShortExpression {
         result: SizedRegOrMemory,
         left: Operand,
-        right: Operand,
+        right: Option<Operand>,
     },
     ResultExtendedExpression {
         result_hi: SizedRegOrMemory,
@@ -1002,6 +1021,10 @@ pub enum ArithmeticOpKind {
     #[default]
     Add,
     Sub,
+    And,
+    Or,
+    Xor,
+    Not,
 }
 
 impl ArithmeticOpKind {
@@ -1009,6 +1032,10 @@ impl ArithmeticOpKind {
         match self {
             ArithmeticOpKind::Add => "+",
             ArithmeticOpKind::Sub => "-",
+            ArithmeticOpKind::And => "&",
+            ArithmeticOpKind::Or => "|",
+            ArithmeticOpKind::Xor => "^",
+            ArithmeticOpKind::Not => "!",
         }
     }
 }
@@ -1332,10 +1359,10 @@ fn lift_movsx(instr: Instruction) -> Option<SemanticInstruction> {
 }
 
 fn lift_arithmetic(instr: Instruction) -> Option<SemanticInstruction> {
-    lift_add(instr)
-        .or_else(|| lift_sub(instr))
-        .or_else(|| lift_inc(instr))
-        .or_else(|| lift_dec(instr))
+    lift_add_sub(instr)
+        .or_else(|| lift_inc_dec(instr))
+        .or_else(|| lift_and_or_xor(instr))
+        .or_else(|| lift_not(instr))
 }
 
 fn lift_sized_mem_or_reg_from_2ops(
@@ -1364,96 +1391,90 @@ fn lift_short_arith_expression(instr: &Instruction) -> Option<ArithmeticOperands
     Some(ArithmeticOperands::ShortExpression {
         result: lift_sized_mem_or_reg_from_2ops(instr, 0)?,
         left: lift_operand(instr, 0)?,
-        right: lift_operand(instr, 1)?,
+        right: Some(lift_operand(instr, 1)?),
     })
 }
 
-fn lift_add(instr: Instruction) -> Option<SemanticInstruction> {
-    if instr.mnemonic() != Mnemonic::Add {
-        return None;
-    }
+fn lift_add_sub(instr: Instruction) -> Option<SemanticInstruction> {
+    let kind = match instr.mnemonic() {
+        Mnemonic::Add => ArithmeticOpKind::Add,
+        Mnemonic::Sub => ArithmeticOpKind::Sub,
+        _ => return None,
+    };
 
     Some(SemanticInstruction::Arithmetic(ArithmeticInstruction {
         operands: lift_short_arith_expression(&instr)?,
         flags_effect: FlagsEffect {
-            read: Flags::empty(),
             written: Flags::ZERO
                 | Flags::CARRY
                 | Flags::SIGN
                 | Flags::OVERFLOW
                 | Flags::PARITY
                 | Flags::AUXILLIARY_OVERFLOW,
-            undefined: Flags::empty(),
+            ..FlagsEffect::NONE
         },
-        kind: ArithmeticOpKind::Add,
+        kind,
     }))
 }
 
-fn lift_sub(instr: Instruction) -> Option<SemanticInstruction> {
-    if instr.mnemonic() != Mnemonic::Sub {
-        return None;
-    }
+fn lift_inc_dec(instr: Instruction) -> Option<SemanticInstruction> {
+    let kind = match instr.mnemonic() {
+        Mnemonic::Inc => ArithmeticOpKind::Add,
+        Mnemonic::Dec => ArithmeticOpKind::Sub,
+        _ => return None,
+    };
+
+    Some(SemanticInstruction::Arithmetic(ArithmeticInstruction {
+        operands: ArithmeticOperands::ShortExpression {
+            result: lift_sized_mem_or_reg_from_2ops(&instr, 0)?,
+            left: lift_operand(&instr, 0)?,
+            right: Some(Operand::Const(1)),
+        },
+        flags_effect: FlagsEffect {
+            written: Flags::ZERO
+                | Flags::SIGN
+                | Flags::OVERFLOW
+                | Flags::PARITY
+                | Flags::AUXILLIARY_OVERFLOW,
+            ..FlagsEffect::NONE
+        },
+        kind,
+    }))
+}
+
+fn lift_and_or_xor(instr: Instruction) -> Option<SemanticInstruction> {
+    let kind = match instr.mnemonic() {
+        Mnemonic::And => ArithmeticOpKind::And,
+        Mnemonic::Or => ArithmeticOpKind::Or,
+        Mnemonic::Xor => ArithmeticOpKind::Xor,
+        _ => return None,
+    };
 
     Some(SemanticInstruction::Arithmetic(ArithmeticInstruction {
         operands: lift_short_arith_expression(&instr)?,
         flags_effect: FlagsEffect {
             read: Flags::empty(),
-            written: Flags::ZERO
-                | Flags::CARRY
-                | Flags::SIGN
-                | Flags::OVERFLOW
-                | Flags::PARITY
-                | Flags::AUXILLIARY_OVERFLOW,
-            undefined: Flags::empty(),
+            written: Flags::CARRY | Flags::OVERFLOW | Flags::ZERO | Flags::SIGN | Flags::PARITY,
+            undefined: Flags::AUXILLIARY_OVERFLOW,
+            set_mask: Flags::CARRY | Flags::OVERFLOW,
+            set_values: Flags::empty(),
         },
-        kind: ArithmeticOpKind::Sub,
+        kind,
     }))
 }
 
-fn lift_inc(instr: Instruction) -> Option<SemanticInstruction> {
-    if instr.mnemonic() != Mnemonic::Inc {
+fn lift_not(instr: Instruction) -> Option<SemanticInstruction> {
+    if instr.mnemonic() != Mnemonic::Not {
         return None;
-    }
+    };
 
     Some(SemanticInstruction::Arithmetic(ArithmeticInstruction {
         operands: ArithmeticOperands::ShortExpression {
             result: lift_sized_mem_or_reg_from_2ops(&instr, 0)?,
             left: lift_operand(&instr, 0)?,
-            right: Operand::Const(1),
+            right: None,
         },
-        flags_effect: FlagsEffect {
-            read: Flags::empty(),
-            written: Flags::ZERO
-                | Flags::SIGN
-                | Flags::OVERFLOW
-                | Flags::PARITY
-                | Flags::AUXILLIARY_OVERFLOW,
-            undefined: Flags::empty(),
-        },
-        kind: ArithmeticOpKind::Add,
-    }))
-}
-
-fn lift_dec(instr: Instruction) -> Option<SemanticInstruction> {
-    if instr.mnemonic() != Mnemonic::Dec {
-        return None;
-    }
-
-    Some(SemanticInstruction::Arithmetic(ArithmeticInstruction {
-        operands: ArithmeticOperands::ShortExpression {
-            result: lift_sized_mem_or_reg_from_2ops(&instr, 0)?,
-            left: lift_operand(&instr, 0)?,
-            right: Operand::Const(1),
-        },
-        flags_effect: FlagsEffect {
-            read: Flags::empty(),
-            written: Flags::ZERO
-                | Flags::SIGN
-                | Flags::OVERFLOW
-                | Flags::PARITY
-                | Flags::AUXILLIARY_OVERFLOW,
-            undefined: Flags::empty(),
-        },
-        kind: ArithmeticOpKind::Sub,
+        flags_effect: FlagsEffect::NONE,
+        kind: ArithmeticOpKind::Not,
     }))
 }

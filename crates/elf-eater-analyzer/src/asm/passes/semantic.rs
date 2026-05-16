@@ -291,7 +291,7 @@ bitflags! {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FlagsEffect {
     pub read: Flags,
-    pub modified: Flags,
+    pub written: Flags,
     pub undefined: Flags,
 }
 
@@ -1001,12 +1001,14 @@ pub enum ArithmeticOperands {
 pub enum ArithmeticOpKind {
     #[default]
     Add,
+    Sub,
 }
 
 impl ArithmeticOpKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             ArithmeticOpKind::Add => "+",
+            ArithmeticOpKind::Sub => "-",
         }
     }
 }
@@ -1331,6 +1333,9 @@ fn lift_movsx(instr: Instruction) -> Option<SemanticInstruction> {
 
 fn lift_arithmetic(instr: Instruction) -> Option<SemanticInstruction> {
     lift_add(instr)
+        .or_else(|| lift_sub(instr))
+        .or_else(|| lift_inc(instr))
+        .or_else(|| lift_dec(instr))
 }
 
 fn lift_sized_mem_or_reg_from_2ops(
@@ -1355,20 +1360,24 @@ fn lift_sized_mem_or_reg_from_2ops(
     Some(SizedRegOrMemory::new(result_unsized, slice))
 }
 
+fn lift_short_arith_expression(instr: &Instruction) -> Option<ArithmeticOperands> {
+    Some(ArithmeticOperands::ShortExpression {
+        result: lift_sized_mem_or_reg_from_2ops(instr, 0)?,
+        left: lift_operand(instr, 0)?,
+        right: lift_operand(instr, 1)?,
+    })
+}
+
 fn lift_add(instr: Instruction) -> Option<SemanticInstruction> {
     if instr.mnemonic() != Mnemonic::Add {
         return None;
     }
 
     Some(SemanticInstruction::Arithmetic(ArithmeticInstruction {
-        operands: ArithmeticOperands::ShortExpression {
-            result: lift_sized_mem_or_reg_from_2ops(&instr, 0)?,
-            left: lift_operand(&instr, 0)?,
-            right: lift_operand(&instr, 1)?,
-        },
+        operands: lift_short_arith_expression(&instr)?,
         flags_effect: FlagsEffect {
             read: Flags::empty(),
-            modified: Flags::ZERO
+            written: Flags::ZERO
                 | Flags::CARRY
                 | Flags::SIGN
                 | Flags::OVERFLOW
@@ -1377,5 +1386,74 @@ fn lift_add(instr: Instruction) -> Option<SemanticInstruction> {
             undefined: Flags::empty(),
         },
         kind: ArithmeticOpKind::Add,
+    }))
+}
+
+fn lift_sub(instr: Instruction) -> Option<SemanticInstruction> {
+    if instr.mnemonic() != Mnemonic::Sub {
+        return None;
+    }
+
+    Some(SemanticInstruction::Arithmetic(ArithmeticInstruction {
+        operands: lift_short_arith_expression(&instr)?,
+        flags_effect: FlagsEffect {
+            read: Flags::empty(),
+            written: Flags::ZERO
+                | Flags::CARRY
+                | Flags::SIGN
+                | Flags::OVERFLOW
+                | Flags::PARITY
+                | Flags::AUXILLIARY_OVERFLOW,
+            undefined: Flags::empty(),
+        },
+        kind: ArithmeticOpKind::Sub,
+    }))
+}
+
+fn lift_inc(instr: Instruction) -> Option<SemanticInstruction> {
+    if instr.mnemonic() != Mnemonic::Inc {
+        return None;
+    }
+
+    Some(SemanticInstruction::Arithmetic(ArithmeticInstruction {
+        operands: ArithmeticOperands::ShortExpression {
+            result: lift_sized_mem_or_reg_from_2ops(&instr, 0)?,
+            left: lift_operand(&instr, 0)?,
+            right: Operand::Const(1),
+        },
+        flags_effect: FlagsEffect {
+            read: Flags::empty(),
+            written: Flags::ZERO
+                | Flags::SIGN
+                | Flags::OVERFLOW
+                | Flags::PARITY
+                | Flags::AUXILLIARY_OVERFLOW,
+            undefined: Flags::empty(),
+        },
+        kind: ArithmeticOpKind::Add,
+    }))
+}
+
+fn lift_dec(instr: Instruction) -> Option<SemanticInstruction> {
+    if instr.mnemonic() != Mnemonic::Dec {
+        return None;
+    }
+
+    Some(SemanticInstruction::Arithmetic(ArithmeticInstruction {
+        operands: ArithmeticOperands::ShortExpression {
+            result: lift_sized_mem_or_reg_from_2ops(&instr, 0)?,
+            left: lift_operand(&instr, 0)?,
+            right: Operand::Const(1),
+        },
+        flags_effect: FlagsEffect {
+            read: Flags::empty(),
+            written: Flags::ZERO
+                | Flags::SIGN
+                | Flags::OVERFLOW
+                | Flags::PARITY
+                | Flags::AUXILLIARY_OVERFLOW,
+            undefined: Flags::empty(),
+        },
+        kind: ArithmeticOpKind::Sub,
     }))
 }

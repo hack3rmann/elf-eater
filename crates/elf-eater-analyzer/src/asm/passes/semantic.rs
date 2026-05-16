@@ -1,5 +1,11 @@
 use iced_x86::{Formatter, Instruction, Mnemonic, NasmFormatter, OpKind, Register};
-use std::fmt::{self, Display};
+use std::{
+    fmt::{self, Display},
+    num::NonZeroU16,
+};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InstructionIndex(pub u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SemanticInstruction {
@@ -9,7 +15,7 @@ pub enum SemanticInstruction {
     },
     /// `call reg64`
     IndirectCallReg {
-        register: GpRegister,
+        register: Register64,
     },
     /// `call qword [base + index * scale + displacement]`
     IndirectCallMem {
@@ -19,25 +25,23 @@ pub enum SemanticInstruction {
     Return,
     /// `ret 42`
     ReturnClear {
-        amount: u16,
+        amount: NonZeroU16,
     },
     /// `mov reg_any, mem`
     Load {
-        size: PointerSize,
         destination: GpRegister,
         source: MemoryExpression,
     },
     /// `mov mem, reg_any`
     Store {
-        size: PointerSize,
         destination: MemoryExpression,
         source: GpRegister,
     },
     /// `mov reg_any, reg_any`
     Assignment {
-        size: PointerSize,
-        destination: GpRegister,
-        source: GpRegister,
+        slice: RegisterSliceKind,
+        destination: Register64,
+        source: Register64,
     },
     /// `lea reg64, [expr]`
     LoadAddress {
@@ -46,7 +50,7 @@ pub enum SemanticInstruction {
     },
     /// `xchg destination, source`
     Exchange {
-        size: PointerSize,
+        slice: RegisterSliceKind,
         first: RegOrMemory,
         second: RegOrMemory,
     },
@@ -56,7 +60,7 @@ pub enum SemanticInstruction {
     },
     /// `jmp reg64`
     IndirectJumpReg {
-        register: GpRegister,
+        register: Register64,
     },
     /// `jmp qword [base + index * scale + displacement]`
     IndirectJumpMem {
@@ -69,35 +73,22 @@ pub enum SemanticInstruction {
     },
     /// `test left, right`
     Test {
-        size: PointerSize,
         left: Operand,
         right: Operand,
     },
     /// `cmp left, right`
     Cmp {
-        size: PointerSize,
         left: Operand,
         right: Operand,
     },
-    /// `push 42`
-    PushConst {
-        value: u64,
-    },
-    /// `push reg64`
-    PushReg {
-        reg: GpRegister,
-    },
-    /// `push qword [mem]`
-    PushMem {
-        expr: MemoryExpression,
+    /// `push op`
+    Push {
+        operand: Operand,
     },
     /// `pop reg64`
-    PopReg {
-        reg: GpRegister,
-    },
-    /// `pop qword [mem]`
-    PopMem {
-        expr: MemoryExpression,
+    Pop {
+        slice: RegisterSliceKind,
+        operand: RegOrMemory,
     },
     BinaryOp {
         // TODO(hack3rmann): operand sizes
@@ -134,37 +125,53 @@ impl SemanticInstruction {
                 write!(buf, "ret 0x{amount:x}").unwrap();
             }
             SemanticInstruction::Load {
-                size,
                 destination,
                 source,
             } => {
-                write!(buf, "mov {destination}, {size} {source}").unwrap();
+                write!(buf, "mov {destination}, {source}").unwrap();
             }
             SemanticInstruction::Store {
-                size,
                 destination,
                 source,
             } => {
-                write!(buf, "mov {size} {destination}, {source}").unwrap();
+                write!(buf, "mov {destination}, {source}").unwrap();
             }
-            SemanticInstruction::Assignment {
-                size: _,
+            &SemanticInstruction::Assignment {
+                slice,
                 destination,
                 source,
             } => {
-                // FIXME(hack3rmann): handle size
+                let destination = GpRegister::new(destination, slice);
+                let source = GpRegister::new(source, slice);
+
                 write!(buf, "mov {destination}, {source}").unwrap();
             }
             SemanticInstruction::LoadAddress { destination, expr } => {
                 write!(buf, "lea {destination}, {expr}").unwrap();
             }
-            SemanticInstruction::Exchange {
-                size: _,
+            &SemanticInstruction::Exchange {
+                slice,
                 first,
                 second,
             } => {
-                // FIXME(hack3rmann): handle size
-                write!(buf, "xchg {first}, {second}").unwrap();
+                match (first, second) {
+                    (RegOrMemory::Reg(reg1), RegOrMemory::Reg(reg2)) => {
+                        let first = GpRegister::new(reg1, slice);
+                        let second = GpRegister::new(reg2, slice);
+
+                        write!(buf, "xchg {first}, {second}").unwrap();
+                    }
+                    (RegOrMemory::Reg(reg), RegOrMemory::Mem(mem))
+                    | (RegOrMemory::Mem(mem), RegOrMemory::Reg(reg)) => {
+                        let reg = GpRegister::new(reg, slice);
+
+                        write!(buf, "xchg {reg}, {mem}").unwrap();
+                    }
+                    (RegOrMemory::Mem(mem1), RegOrMemory::Mem(mem2)) => {
+                        // NOTE: unreachable actually
+                        write!(buf, "xchg {mem1}, {mem2}").unwrap();
+                    }
+                }
             }
             SemanticInstruction::DirectJump { address } => {
                 write!(buf, "jmp 0x{address:x}").unwrap();
@@ -178,37 +185,24 @@ impl SemanticInstruction {
             SemanticInstruction::ConditionalJump { address, ty } => {
                 write!(buf, "j{ty} 0x{address:x}").unwrap();
             }
-            SemanticInstruction::Test {
-                size: _,
-                left,
-                right,
-            } => {
-                // TODO(hack3rmann): register sizes
+            SemanticInstruction::Test { left, right } => {
                 write!(buf, "test {left}, {right}").unwrap();
             }
-            SemanticInstruction::Cmp {
-                size: _,
-                left,
-                right,
-            } => {
-                // TODO(hack3rmann): register sizes
+            SemanticInstruction::Cmp { left, right } => {
                 write!(buf, "cmp {left}, {right}").unwrap();
             }
-            SemanticInstruction::PushConst { value } => {
-                write!(buf, "push {value}").unwrap();
+            SemanticInstruction::Push { operand } => {
+                write!(buf, "push {operand}").unwrap();
             }
-            SemanticInstruction::PushReg { reg } => {
-                write!(buf, "push {reg}").unwrap();
-            }
-            SemanticInstruction::PushMem { expr } => {
-                write!(buf, "push qword {expr}").unwrap();
-            }
-            SemanticInstruction::PopReg { reg } => {
-                write!(buf, "pop {reg}").unwrap();
-            }
-            SemanticInstruction::PopMem { expr } => {
-                write!(buf, "pop {expr}").unwrap();
-            }
+            &SemanticInstruction::Pop { slice, operand } => match operand {
+                RegOrMemory::Reg(reg64) => {
+                    let reg = GpRegister::new(reg64, slice);
+                    write!(buf, "pop {reg}").unwrap();
+                }
+                RegOrMemory::Mem(mem) => {
+                    write!(buf, "pop {mem}").unwrap();
+                }
+            },
             SemanticInstruction::BinaryOp {
                 kind,
                 destination,
@@ -318,7 +312,7 @@ impl Display for UnaryOpKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RegOrMemory {
-    Reg(GpRegister),
+    Reg(Register64),
     Mem(MemoryExpression),
 }
 
@@ -466,8 +460,8 @@ impl Display for MemoryScale {
 pub enum MemoryExpression {
     /// `[base + index * scale + displacement]`
     Absolute {
-        base: Option<GpRegister>,
-        index: Option<GpRegister>,
+        base: Option<Register64>,
+        index: Option<Register64>,
         scale: MemoryScale,
         displacement: i64,
     },
@@ -558,8 +552,8 @@ impl From<RelativeMemoryExpression> for MemoryExpression {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AbsoluteMemoryExpression {
-    pub base: Option<GpRegister>,
-    pub index: Option<GpRegister>,
+    pub base: Option<Register64>,
+    pub index: Option<Register64>,
     pub scale: MemoryScale,
     pub displacement: i64,
 }
@@ -570,53 +564,117 @@ pub struct RelativeMemoryExpression {
     pub address: u64,
 }
 
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ExtendedGpRegister {
-    pub upper: GpRegister,
-    pub lower: GpRegister,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExtendedRegister {
+    pub upper: Register64,
+    pub lower: Register64,
 }
 
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum GpRegister {
-    #[default]
-    Rax = 0,
-    Rbx = 1,
-    Rcx = 2,
-    Rdx = 3,
-    Rsi = 4,
-    Rdi = 5,
-    Rbp = 6,
-    Rsp = 7,
-    R8 = 8,
-    R9 = 9,
-    R10 = 10,
-    R11 = 11,
-    R12 = 12,
-    R13 = 13,
-    R14 = 14,
-    R15 = 15,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GpRegister {
+    pub full: Register64,
+    pub slice_kind: RegisterSliceKind,
 }
 
 impl GpRegister {
+    pub const fn new(full: Register64, slice_kind: RegisterSliceKind) -> Self {
+        Self { full, slice_kind }
+    }
+
     pub const fn as_str(self) -> &'static str {
-        match self {
-            GpRegister::Rax => "rax",
-            GpRegister::Rbx => "rbx",
-            GpRegister::Rcx => "rcx",
-            GpRegister::Rdx => "rdx",
-            GpRegister::Rsi => "rsi",
-            GpRegister::Rdi => "rdi",
-            GpRegister::Rbp => "rbp",
-            GpRegister::Rsp => "rsp",
-            GpRegister::R8 => "r8",
-            GpRegister::R9 => "r9",
-            GpRegister::R10 => "r10",
-            GpRegister::R11 => "r11",
-            GpRegister::R12 => "r12",
-            GpRegister::R13 => "r13",
-            GpRegister::R14 => "r14",
-            GpRegister::R15 => "r15",
+        match (self.full, self.slice_kind) {
+            (Register64::Rax, RegisterSliceKind::R64) => "reg_a",
+            (Register64::Rax, RegisterSliceKind::R32) => "reg_a[32..]",
+            (Register64::Rax, RegisterSliceKind::R16) => "reg_a[48..]",
+            (Register64::Rax, RegisterSliceKind::H8) => "reg_a[48..56]",
+            (Register64::Rax, RegisterSliceKind::L8) => "reg_a[56..]",
+            (Register64::Rbx, RegisterSliceKind::R64) => "reg_b",
+            (Register64::Rbx, RegisterSliceKind::R32) => "reg_b[32..]",
+            (Register64::Rbx, RegisterSliceKind::R16) => "reg_b[48..]",
+            (Register64::Rbx, RegisterSliceKind::H8) => "reg_b[48..56]",
+            (Register64::Rbx, RegisterSliceKind::L8) => "reg_b[56..]",
+            (Register64::Rcx, RegisterSliceKind::R64) => "reg_c",
+            (Register64::Rcx, RegisterSliceKind::R32) => "reg_c[32..]",
+            (Register64::Rcx, RegisterSliceKind::R16) => "reg_c[48..]",
+            (Register64::Rcx, RegisterSliceKind::H8) => "reg_c[48..56]",
+            (Register64::Rcx, RegisterSliceKind::L8) => "reg_c[56..]",
+            (Register64::Rdx, RegisterSliceKind::R64) => "reg_d",
+            (Register64::Rdx, RegisterSliceKind::R32) => "reg_d[32..]",
+            (Register64::Rdx, RegisterSliceKind::R16) => "reg_d[48..]",
+            (Register64::Rdx, RegisterSliceKind::H8) => "reg_d[48..56]",
+            (Register64::Rdx, RegisterSliceKind::L8) => "reg_d[56..]",
+            (Register64::Rsi, RegisterSliceKind::R64) => "reg_si",
+            (Register64::Rsi, RegisterSliceKind::R32) => "reg_si[32..]",
+            (Register64::Rsi, RegisterSliceKind::R16) => "reg_si[48..]",
+            (Register64::Rsi, RegisterSliceKind::H8) => "reg_si[48..56]",
+            (Register64::Rsi, RegisterSliceKind::L8) => "reg_si[56..]",
+            (Register64::Rdi, RegisterSliceKind::R64) => "reg_di",
+            (Register64::Rdi, RegisterSliceKind::R32) => "reg_di[32..]",
+            (Register64::Rdi, RegisterSliceKind::R16) => "reg_di[48..]",
+            (Register64::Rdi, RegisterSliceKind::H8) => "reg_di[48..56]",
+            (Register64::Rdi, RegisterSliceKind::L8) => "reg_di[56..]",
+            (Register64::Rbp, RegisterSliceKind::R64) => "reg_bp",
+            (Register64::Rbp, RegisterSliceKind::R32) => "reg_bp[32..]",
+            (Register64::Rbp, RegisterSliceKind::R16) => "reg_bp[48..]",
+            (Register64::Rbp, RegisterSliceKind::H8) => "reg_bp[48..56]",
+            (Register64::Rbp, RegisterSliceKind::L8) => "reg_bp[56..]",
+            (Register64::Rsp, RegisterSliceKind::R64) => "reg_sp",
+            (Register64::Rsp, RegisterSliceKind::R32) => "reg_sp[32..]",
+            (Register64::Rsp, RegisterSliceKind::R16) => "reg_sp[48..]",
+            (Register64::Rsp, RegisterSliceKind::H8) => "reg_sp[48..56]",
+            (Register64::Rsp, RegisterSliceKind::L8) => "reg_sp[56..]",
+            (Register64::R8, RegisterSliceKind::R64) => "reg_8",
+            (Register64::R8, RegisterSliceKind::R32) => "reg_8[32..]",
+            (Register64::R8, RegisterSliceKind::R16) => "reg_8[48..]",
+            (Register64::R8, RegisterSliceKind::H8) => "reg_8[48..56]",
+            (Register64::R8, RegisterSliceKind::L8) => "reg_8[56..]",
+            (Register64::R9, RegisterSliceKind::R64) => "reg_9",
+            (Register64::R9, RegisterSliceKind::R32) => "reg_9[32..]",
+            (Register64::R9, RegisterSliceKind::R16) => "reg_9[48..]",
+            (Register64::R9, RegisterSliceKind::H8) => "reg_9[48..56]",
+            (Register64::R9, RegisterSliceKind::L8) => "reg_9[56..]",
+            (Register64::R10, RegisterSliceKind::R64) => "reg_10",
+            (Register64::R10, RegisterSliceKind::R32) => "reg_10[32..]",
+            (Register64::R10, RegisterSliceKind::R16) => "reg_10[48..]",
+            (Register64::R10, RegisterSliceKind::H8) => "reg_10[48..56]",
+            (Register64::R10, RegisterSliceKind::L8) => "reg_10[56..]",
+            (Register64::R11, RegisterSliceKind::R64) => "reg_11",
+            (Register64::R11, RegisterSliceKind::R32) => "reg_11[32..]",
+            (Register64::R11, RegisterSliceKind::R16) => "reg_11[48..]",
+            (Register64::R11, RegisterSliceKind::H8) => "reg_11[48..56]",
+            (Register64::R11, RegisterSliceKind::L8) => "reg_11[56..]",
+            (Register64::R12, RegisterSliceKind::R64) => "reg_12",
+            (Register64::R12, RegisterSliceKind::R32) => "reg_12[32..]",
+            (Register64::R12, RegisterSliceKind::R16) => "reg_12[48..]",
+            (Register64::R12, RegisterSliceKind::H8) => "reg_12[48..56]",
+            (Register64::R12, RegisterSliceKind::L8) => "reg_12[56..]",
+            (Register64::R13, RegisterSliceKind::R64) => "reg_13",
+            (Register64::R13, RegisterSliceKind::R32) => "reg_13[32..]",
+            (Register64::R13, RegisterSliceKind::R16) => "reg_13[48..]",
+            (Register64::R13, RegisterSliceKind::H8) => "reg_13[48..56]",
+            (Register64::R13, RegisterSliceKind::L8) => "reg_13[56..]",
+            (Register64::R14, RegisterSliceKind::R64) => "reg_14",
+            (Register64::R14, RegisterSliceKind::R32) => "reg_14[32..]",
+            (Register64::R14, RegisterSliceKind::R16) => "reg_14[48..]",
+            (Register64::R14, RegisterSliceKind::H8) => "reg_14[48..56]",
+            (Register64::R14, RegisterSliceKind::L8) => "reg_14[56..]",
+            (Register64::R15, RegisterSliceKind::R64) => "reg_15",
+            (Register64::R15, RegisterSliceKind::R32) => "reg_15[32..]",
+            (Register64::R15, RegisterSliceKind::R16) => "reg_15[48..]",
+            (Register64::R15, RegisterSliceKind::H8) => "reg_15[48..56]",
+            (Register64::R15, RegisterSliceKind::L8) => "reg_15[56..]",
         }
+    }
+}
+
+impl TryFrom<Register> for GpRegister {
+    type Error = ();
+
+    fn try_from(value: Register) -> Result<Self, Self::Error> {
+        Ok(Self {
+            full: Register64::try_from(value)?,
+            slice_kind: RegisterSliceKind::try_from(value)?,
+        })
     }
 }
 
@@ -626,29 +684,154 @@ impl Display for GpRegister {
     }
 }
 
-impl TryFrom<Register> for GpRegister {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Register64 {
+    #[default]
+    Rax,
+    Rbx,
+    Rcx,
+    Rdx,
+    Rsi,
+    Rdi,
+    Rbp,
+    Rsp,
+    R8,
+    R9,
+    R10,
+    R11,
+    R12,
+    R13,
+    R14,
+    R15,
+}
+
+impl Register64 {
+    pub const fn as_str(self) -> &'static str {
+        GpRegister::new(self, RegisterSliceKind::R64).as_str()
+    }
+}
+
+impl Display for Register64 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<Register> for Register64 {
     type Error = ();
 
     fn try_from(reg: Register) -> Result<Self, Self::Error> {
-        match reg.full_register() {
-            Register::RAX => Ok(Self::Rax),
-            Register::RBX => Ok(Self::Rbx),
-            Register::RCX => Ok(Self::Rcx),
-            Register::RDX => Ok(Self::Rdx),
-            Register::RSI => Ok(Self::Rsi),
-            Register::RDI => Ok(Self::Rdi),
-            Register::RBP => Ok(Self::Rbp),
-            Register::RSP => Ok(Self::Rsp),
-            Register::R8 => Ok(Self::R8),
-            Register::R9 => Ok(Self::R9),
-            Register::R10 => Ok(Self::R10),
-            Register::R11 => Ok(Self::R11),
-            Register::R12 => Ok(Self::R12),
-            Register::R13 => Ok(Self::R13),
-            Register::R14 => Ok(Self::R14),
-            Register::R15 => Ok(Self::R15),
-            _ => Err(()),
-        }
+        Ok(match reg.full_register() {
+            Register::RAX => Self::Rax,
+            Register::RBX => Self::Rbx,
+            Register::RCX => Self::Rcx,
+            Register::RDX => Self::Rdx,
+            Register::RSI => Self::Rsi,
+            Register::RDI => Self::Rdi,
+            Register::RBP => Self::Rbp,
+            Register::RSP => Self::Rsp,
+            Register::R8 => Self::R8,
+            Register::R9 => Self::R9,
+            Register::R10 => Self::R10,
+            Register::R11 => Self::R11,
+            Register::R12 => Self::R12,
+            Register::R13 => Self::R13,
+            Register::R14 => Self::R14,
+            Register::R15 => Self::R15,
+            _ => return Err(()),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RegisterSliceKind {
+    /// 64-bit full register
+    #[default]
+    R64,
+    /// Low 32 bits
+    R32,
+    /// Low 16 bits
+    R16,
+    /// High 8 bits of low 16 bits
+    H8,
+    /// Low 8 bits of low 16 bits
+    L8,
+}
+
+impl TryFrom<Register> for RegisterSliceKind {
+    type Error = ();
+
+    fn try_from(value: Register) -> Result<Self, Self::Error> {
+        Ok(match value {
+            Register::SPL
+            | Register::BPL
+            | Register::SIL
+            | Register::DIL
+            | Register::R8L
+            | Register::R9L
+            | Register::R10L
+            | Register::R11L
+            | Register::R12L
+            | Register::R13L
+            | Register::R14L
+            | Register::R15L
+            | Register::AL
+            | Register::CL
+            | Register::DL
+            | Register::BL => Self::L8,
+            Register::AH | Register::CH | Register::DH | Register::BH => Self::H8,
+            Register::AX
+            | Register::CX
+            | Register::DX
+            | Register::BX
+            | Register::SP
+            | Register::BP
+            | Register::SI
+            | Register::DI
+            | Register::R8W
+            | Register::R9W
+            | Register::R10W
+            | Register::R11W
+            | Register::R12W
+            | Register::R13W
+            | Register::R14W
+            | Register::R15W => Self::R16,
+            Register::EAX
+            | Register::ECX
+            | Register::EDX
+            | Register::EBX
+            | Register::ESP
+            | Register::EBP
+            | Register::ESI
+            | Register::EDI
+            | Register::EIP
+            | Register::R8D
+            | Register::R9D
+            | Register::R10D
+            | Register::R11D
+            | Register::R12D
+            | Register::R13D
+            | Register::R14D
+            | Register::R15D => Self::R32,
+            Register::RAX
+            | Register::RCX
+            | Register::RDX
+            | Register::RBX
+            | Register::RSP
+            | Register::RBP
+            | Register::RSI
+            | Register::RDI
+            | Register::R8
+            | Register::R9
+            | Register::R10
+            | Register::R11
+            | Register::R12
+            | Register::R13
+            | Register::R14
+            | Register::R15
+            | Register::RIP => Self::R64,
+            _ => return Err(()),
+        })
     }
 }
 
@@ -661,12 +844,12 @@ fn lift_memory(instr: &Instruction) -> Option<MemoryExpression> {
 
     let base = match instr.memory_base() {
         Register::None => None,
-        r => Some(GpRegister::try_from(r).ok()?),
+        r => Some(Register64::try_from(r).ok()?),
     };
 
     let index = match instr.memory_index() {
         Register::None => None,
-        r => Some(GpRegister::try_from(r).ok()?),
+        r => Some(Register64::try_from(r).ok()?),
     };
 
     let scale = match instr.memory_index_scale() {
@@ -698,7 +881,7 @@ fn lift_call(instr: Instruction) -> Option<SemanticInstruction> {
 
     Some(match instr.op0_kind() {
         OpKind::Register => {
-            let reg = GpRegister::try_from(instr.op0_register()).ok()?;
+            let reg = Register64::try_from(instr.op0_register()).ok()?;
             SemanticInstruction::IndirectCallReg { register: reg }
         }
         OpKind::Memory => SemanticInstruction::IndirectCallMem {
@@ -713,12 +896,10 @@ fn lift_ret(instr: Instruction) -> Option<SemanticInstruction> {
         return None;
     }
 
-    Some(if instr.immediate16() == 0 {
-        SemanticInstruction::Return
+    Some(if let Some(amount) = NonZeroU16::new(instr.immediate16()) {
+        SemanticInstruction::ReturnClear { amount }
     } else {
-        SemanticInstruction::ReturnClear {
-            amount: instr.immediate16(),
-        }
+        SemanticInstruction::Return
     })
 }
 
@@ -728,37 +909,26 @@ fn lift_mov(instr: Instruction) -> Option<SemanticInstruction> {
     }
 
     Some(match (instr.op0_kind(), instr.op1_kind()) {
-        (OpKind::Register, OpKind::Memory) => {
-            SemanticInstruction::Load {
-                // FIXME(hack3rmann): pointer size
-                size: PointerSize::Qword,
-                destination: GpRegister::try_from(instr.op0_register()).ok()?,
-                source: lift_memory(&instr)?,
-            }
-        }
-        (OpKind::Memory, OpKind::Register) => {
-            SemanticInstruction::Store {
-                // FIXME(hack3rmann): pointer size
-                size: PointerSize::Qword,
-                destination: lift_memory(&instr)?,
-                source: GpRegister::try_from(instr.op1_register()).ok()?,
-            }
-        }
-        (OpKind::Register, OpKind::Register) => {
-            SemanticInstruction::Assignment {
-                // FIXME(hack3rmann): pointer size
-                size: PointerSize::Qword,
-                destination: GpRegister::try_from(instr.op0_register()).ok()?,
-                source: GpRegister::try_from(instr.op1_register()).ok()?,
-            }
-        }
+        (OpKind::Register, OpKind::Memory) => SemanticInstruction::Load {
+            destination: GpRegister::try_from(instr.op0_register()).ok()?,
+            source: lift_memory(&instr)?,
+        },
+        (OpKind::Memory, OpKind::Register) => SemanticInstruction::Store {
+            destination: lift_memory(&instr)?,
+            source: GpRegister::try_from(instr.op1_register()).ok()?,
+        },
+        (OpKind::Register, OpKind::Register) => SemanticInstruction::Assignment {
+            slice: RegisterSliceKind::try_from(instr.op0_register()).ok()?,
+            destination: Register64::try_from(instr.op0_register()).ok()?,
+            source: Register64::try_from(instr.op1_register()).ok()?,
+        },
         _ => return None,
     })
 }
 
 fn lift_reg_or_mem(instr: &Instruction, op: u32) -> Option<RegOrMemory> {
     Some(match instr.op_kind(op) {
-        OpKind::Register => RegOrMemory::Reg(GpRegister::try_from(instr.op_register(op)).ok()?),
+        OpKind::Register => RegOrMemory::Reg(Register64::try_from(instr.op_register(op)).ok()?),
         OpKind::Memory => RegOrMemory::Mem(lift_memory(instr)?),
         _ => return None,
     })
@@ -788,7 +958,7 @@ fn lift_jump(instr: Instruction) -> Option<SemanticInstruction> {
 
     Some(match instr.op0_kind() {
         OpKind::Register => SemanticInstruction::IndirectJumpReg {
-            register: GpRegister::try_from(instr.op0_register()).ok()?,
+            register: Register64::try_from(instr.op0_register()).ok()?,
         },
         OpKind::Memory => SemanticInstruction::IndirectJumpMem {
             expr: lift_memory(&instr)?,
@@ -845,9 +1015,14 @@ fn lift_xchg(instr: Instruction) -> Option<SemanticInstruction> {
         return None;
     }
 
+    let slice = match (instr.op0_kind(), instr.op1_kind()) {
+        (OpKind::Register, _) => RegisterSliceKind::try_from(instr.op0_register()).ok()?,
+        (_, OpKind::Register) => RegisterSliceKind::try_from(instr.op1_register()).ok()?,
+        _ => RegisterSliceKind::R64,
+    };
+
     Some(SemanticInstruction::Exchange {
-        // FIXME(hack3rmann): xchg size
-        size: PointerSize::Qword,
+        slice,
         first: lift_reg_or_mem(&instr, 0)?,
         second: lift_reg_or_mem(&instr, 1)?,
     })
@@ -858,19 +1033,8 @@ fn lift_push(instr: Instruction) -> Option<SemanticInstruction> {
         return None;
     }
 
-    Some(match instr.op0_kind() {
-        OpKind::Immediate8 | OpKind::Immediate16 | OpKind::Immediate32 | OpKind::Immediate64 => {
-            SemanticInstruction::PushConst {
-                value: instr.immediate64(),
-            }
-        }
-        OpKind::Register => SemanticInstruction::PushReg {
-            reg: GpRegister::try_from(instr.op0_register()).ok()?,
-        },
-        OpKind::Memory => SemanticInstruction::PushMem {
-            expr: lift_memory(&instr)?,
-        },
-        _ => return None,
+    Some(SemanticInstruction::Push {
+        operand: lift_operand(&instr, 0)?,
     })
 }
 
@@ -879,14 +1043,15 @@ fn lift_pop(instr: Instruction) -> Option<SemanticInstruction> {
         return None;
     }
 
-    Some(match instr.op0_kind() {
-        OpKind::Register => SemanticInstruction::PopReg {
-            reg: GpRegister::try_from(instr.op0_register()).ok()?,
-        },
-        OpKind::Memory => SemanticInstruction::PopMem {
-            expr: lift_memory(&instr)?,
-        },
+    let slice = match instr.op0_kind() {
+        OpKind::Register => RegisterSliceKind::try_from(instr.op0_register()).ok()?,
+        OpKind::Memory => RegisterSliceKind::R64,
         _ => return None,
+    };
+
+    Some(SemanticInstruction::Pop {
+        slice,
+        operand: lift_reg_or_mem(&instr, 0)?,
     })
 }
 
@@ -922,7 +1087,6 @@ fn lift_cmp(instr: Instruction) -> Option<SemanticInstruction> {
     }
 
     Some(SemanticInstruction::Cmp {
-        size: PointerSize::Qword,
         left: lift_operand(&instr, 0)?,
         right: lift_operand(&instr, 1)?,
     })
@@ -934,7 +1098,6 @@ fn lift_test(instr: Instruction) -> Option<SemanticInstruction> {
     }
 
     Some(SemanticInstruction::Test {
-        size: PointerSize::Qword,
         left: lift_operand(&instr, 0)?,
         right: lift_operand(&instr, 1)?,
     })

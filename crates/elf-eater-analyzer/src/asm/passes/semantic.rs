@@ -45,16 +45,16 @@ pub enum SemanticInstruction {
         source: MemoryExpression,
         source_size: PointerSize,
     },
-    /// `mov mem, reg_any`
+    /// `mov mem, reg_any|const`
     Store {
         destination: MemoryExpression,
-        source: GpRegister,
+        source: RegOrConst,
     },
-    /// `mov reg_any, reg_any`
+    /// `mov reg_any, reg_any|const`
     Assignment {
         slice: RegisterSliceKind,
         destination: Register64,
-        source: Register64,
+        source: RegOrConst64,
     },
     /// `movzx reg_any, reg_any` or `mov reg32, reg_any`
     AssignmentZeroExtend {
@@ -113,6 +113,8 @@ pub enum SemanticInstruction {
         slice: RegisterSliceKind,
         operand: RegOrMemory,
     },
+    /// No-op
+    Nop,
     Arithmetic(ArithmeticInstruction),
     Other(Instruction),
 }
@@ -162,19 +164,26 @@ impl SemanticInstruction {
                 destination,
                 source,
             } => {
-                let size = PointerSize::from(source.slice_kind);
+                let size = source.size();
                 write!(buf, "mov {size} {destination}, {source}").unwrap();
             }
             &SemanticInstruction::Assignment {
                 slice,
                 destination,
                 source,
-            } => {
-                let destination = GpRegister::new(destination, slice);
-                let source = GpRegister::new(source, slice);
+            } => match source {
+                RegOrConst64::Reg(source) => {
+                    let destination = GpRegister::new(destination, slice);
+                    let source = GpRegister::new(source, slice);
 
-                write!(buf, "mov {destination}, {source}").unwrap();
-            }
+                    write!(buf, "mov {destination}, {source}").unwrap();
+                }
+                RegOrConst64::Const(value) => {
+                    let destination = GpRegister::new(destination, slice);
+
+                    write!(buf, "mov {destination}, {value}").unwrap();
+                }
+            },
             SemanticInstruction::AssignmentZeroExtend {
                 destination,
                 source,
@@ -249,6 +258,7 @@ impl SemanticInstruction {
             SemanticInstruction::Arithmetic(instruction) => {
                 write!(buf, "{instruction}").unwrap();
             }
+            SemanticInstruction::Nop => buf.push_str("nop"),
             SemanticInstruction::Other(instruction) => {
                 formatter.format(instruction, buf);
             }
@@ -272,6 +282,7 @@ impl From<Instruction> for SemanticInstruction {
             .or_else(|| lift_test(instr))
             .or_else(|| lift_cmp(instr))
             .or_else(|| lift_arithmetic(instr))
+            .or_else(|| lift_nop(instr))
             .unwrap_or(SemanticInstruction::Other(instr))
     }
 }
@@ -633,6 +644,45 @@ pub struct RelativeMemoryExpression {
 pub struct ExtendedRegister {
     pub upper: Register64,
     pub lower: Register64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RegOrConst {
+    Reg(GpRegister),
+    Const { value: u64, size: PointerSize },
+}
+
+impl RegOrConst {
+    pub fn size(self) -> PointerSize {
+        match self {
+            RegOrConst::Reg(reg) => reg.slice_kind.into(),
+            RegOrConst::Const { value: _, size } => size,
+        }
+    }
+}
+
+impl Display for RegOrConst {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RegOrConst::Reg(register) => register.fmt(f),
+            RegOrConst::Const { value, size: _ } => value.fmt(f),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RegOrConst64 {
+    Reg(Register64),
+    Const(u64),
+}
+
+impl Display for RegOrConst64 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RegOrConst64::Reg(reg) => reg.fmt(f),
+            RegOrConst64::Const(c) => c.fmt(f),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1138,10 +1188,26 @@ fn lift_mov(instr: Instruction) -> Option<SemanticInstruction> {
                 }
             }
         }
-        (OpKind::Memory, OpKind::Register) => SemanticInstruction::Store {
-            destination: lift_memory(&instr)?,
-            source: GpRegister::try_from(instr.op1_register()).ok()?,
-        },
+        (
+            OpKind::Memory,
+            OpKind::Register
+            | OpKind::Immediate8
+            | OpKind::Immediate16
+            | OpKind::Immediate32
+            | OpKind::Immediate64
+            | OpKind::Immediate8_2nd
+            | OpKind::Immediate8to16
+            | OpKind::Immediate8to32
+            | OpKind::Immediate8to64
+            | OpKind::Immediate32to64,
+        ) => {
+            let size = PointerSize::try_from(instr.memory_size()).ok()?;
+
+            SemanticInstruction::Store {
+                destination: lift_memory(&instr)?,
+                source: lift_reg_or_const(&instr, 1, size)?,
+            }
+        }
         (OpKind::Register, OpKind::Register) => {
             let slice = RegisterSliceKind::try_from(instr.op0_register()).ok()?;
             let destination = Register64::try_from(instr.op0_register()).ok()?;
@@ -1157,10 +1223,26 @@ fn lift_mov(instr: Instruction) -> Option<SemanticInstruction> {
                 SemanticInstruction::Assignment {
                     slice,
                     destination,
-                    source,
+                    source: RegOrConst64::Reg(source),
                 }
             }
         }
+        (
+            OpKind::Register,
+            OpKind::Immediate8
+            | OpKind::Immediate16
+            | OpKind::Immediate32
+            | OpKind::Immediate64
+            | OpKind::Immediate8_2nd
+            | OpKind::Immediate8to16
+            | OpKind::Immediate8to32
+            | OpKind::Immediate8to64
+            | OpKind::Immediate32to64,
+        ) => SemanticInstruction::Assignment {
+            slice: RegisterSliceKind::try_from(instr.op0_register()).ok()?,
+            destination: Register64::try_from(instr.op0_register()).ok()?,
+            source: RegOrConst64::Const(instr.immediate64()),
+        },
         _ => return None,
     })
 }
@@ -1169,6 +1251,25 @@ fn lift_reg_or_mem(instr: &Instruction, op: u32) -> Option<RegOrMemory> {
     Some(match instr.op_kind(op) {
         OpKind::Register => RegOrMemory::Reg(Register64::try_from(instr.op_register(op)).ok()?),
         OpKind::Memory => RegOrMemory::Mem(lift_memory(instr)?),
+        _ => return None,
+    })
+}
+
+fn lift_reg_or_const(instr: &Instruction, op: u32, size: PointerSize) -> Option<RegOrConst> {
+    Some(match instr.op_kind(op) {
+        OpKind::Register => RegOrConst::Reg(GpRegister::try_from(instr.op_register(op)).ok()?),
+        OpKind::Immediate8
+        | OpKind::Immediate16
+        | OpKind::Immediate32
+        | OpKind::Immediate64
+        | OpKind::Immediate8_2nd
+        | OpKind::Immediate8to16
+        | OpKind::Immediate8to32
+        | OpKind::Immediate8to64
+        | OpKind::Immediate32to64 => RegOrConst::Const {
+            value: instr.immediate64(),
+            size,
+        },
         _ => return None,
     })
 }
@@ -1491,9 +1592,8 @@ fn lift_not(instr: Instruction) -> Option<ArithmeticInstruction> {
 
 fn lift_shl_shr_sal_sar(instr: Instruction) -> Option<ArithmeticInstruction> {
     let kind = match instr.mnemonic() {
-        Mnemonic::Shl => ArithmeticOpKind::ShiftLeft,
+        Mnemonic::Shl | Mnemonic::Sal => ArithmeticOpKind::ShiftLeft,
         Mnemonic::Shr => ArithmeticOpKind::ShiftRight,
-        Mnemonic::Sal => ArithmeticOpKind::ShiftLeft,
         Mnemonic::Sar => ArithmeticOpKind::ShiftArithmeticRight,
         _ => return None,
     };
@@ -1550,4 +1650,8 @@ fn lift_shld_shrd(instr: Instruction) -> Option<ArithmeticInstruction> {
         },
         kind,
     })
+}
+
+fn lift_nop(instr: Instruction) -> Option<SemanticInstruction> {
+    (instr.mnemonic() == Mnemonic::Nop).then_some(SemanticInstruction::Nop)
 }

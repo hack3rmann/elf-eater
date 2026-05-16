@@ -38,6 +38,12 @@ pub enum SemanticInstruction {
         source: MemoryExpression,
         source_size: PointerSize,
     },
+    /// `movsx reg_any, mem`
+    LoadSignExtend {
+        destination: GpRegister,
+        source: MemoryExpression,
+        source_size: PointerSize,
+    },
     /// `mov mem, reg_any`
     Store {
         destination: MemoryExpression,
@@ -51,6 +57,11 @@ pub enum SemanticInstruction {
     },
     /// `movzx reg_any, reg_any` or `mov reg32, reg_any`
     AssignmentZeroExtend {
+        destination: GpRegister,
+        source: GpRegister,
+    },
+    /// `movsx reg_any, reg_any`
+    AssignmentSignExtend {
         destination: GpRegister,
         source: GpRegister,
     },
@@ -149,6 +160,13 @@ impl SemanticInstruction {
             } => {
                 write!(buf, "movzx {destination}, {source_size} {source}").unwrap();
             }
+            &SemanticInstruction::LoadSignExtend {
+                destination,
+                source,
+                source_size,
+            } => {
+                write!(buf, "movsx {destination}, {source_size} {source}").unwrap();
+            }
             SemanticInstruction::Store {
                 destination,
                 source,
@@ -171,6 +189,12 @@ impl SemanticInstruction {
                 source,
             } => {
                 write!(buf, "movzx {destination}, {source}").unwrap();
+            }
+            SemanticInstruction::AssignmentSignExtend {
+                destination,
+                source,
+            } => {
+                write!(buf, "movsx {destination}, {source}").unwrap();
             }
             SemanticInstruction::LoadAddress { destination, expr } => {
                 write!(buf, "lea {destination}, {expr}").unwrap();
@@ -255,6 +279,7 @@ impl From<Instruction> for SemanticInstruction {
             .or_else(|| lift_ret(instr))
             .or_else(|| lift_mov(instr))
             .or_else(|| lift_movzx(instr))
+            .or_else(|| lift_movsx(instr))
             .or_else(|| lift_lea(instr))
             .or_else(|| lift_xchg(instr))
             .or_else(|| lift_push(instr))
@@ -1206,6 +1231,27 @@ fn lift_movzx(instr: Instruction) -> Option<SemanticInstruction> {
             source: GpRegister::try_from(instr.op1_register()).ok()?,
         },
         OpKind::Memory => SemanticInstruction::LoadZeroExtend {
+            destination,
+            source: lift_memory(&instr)?,
+            source_size: PointerSize::try_from(instr.memory_size()).ok()?,
+        },
+        _ => return None,
+    })
+}
+
+fn lift_movsx(instr: Instruction) -> Option<SemanticInstruction> {
+    if !matches!(instr.mnemonic(), Mnemonic::Movsx | Mnemonic::Movsxd) {
+        return None;
+    }
+
+    let destination = GpRegister::try_from(instr.op0_register()).ok()?;
+
+    Some(match instr.op1_kind() {
+        OpKind::Register => SemanticInstruction::AssignmentSignExtend {
+            destination,
+            source: GpRegister::try_from(instr.op1_register()).ok()?,
+        },
+        OpKind::Memory => SemanticInstruction::LoadSignExtend {
             destination,
             source: lift_memory(&instr)?,
             source_size: PointerSize::try_from(instr.memory_size()).ok()?,

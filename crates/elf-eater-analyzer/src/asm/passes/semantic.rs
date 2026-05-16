@@ -956,6 +956,14 @@ impl Display for ArithmeticInstruction {
         let op = self.kind.as_str();
 
         match self.operands {
+            ArithmeticOperands::TernaryExpression {
+                result,
+                first,
+                second,
+                third,
+            } => {
+                write!(f, "{result} = {op}({first}, {second}, {third})")
+            }
             ArithmeticOperands::ShortExpression {
                 result,
                 left,
@@ -1001,6 +1009,12 @@ pub enum ArithmeticOperands {
         left: Operand,
         right: Option<Operand>,
     },
+    TernaryExpression {
+        result: SizedRegOrMemory,
+        first: Operand,
+        second: Operand,
+        third: Operand,
+    },
     ResultExtendedExpression {
         result_hi: SizedRegOrMemory,
         result_lo: SizedRegOrMemory,
@@ -1025,17 +1039,37 @@ pub enum ArithmeticOpKind {
     Or,
     Xor,
     Not,
+    ShiftLeft,
+    ShiftRight,
+    ShiftArithmeticLeft,
+    ShiftArithmeticRight,
+    RotateLeft,
+    RotateRight,
+    RotateWithCarryLeft,
+    RotateWithCarryRight,
+    ShiftPreciseLeft,
+    ShiftPreciseRight,
 }
 
 impl ArithmeticOpKind {
     pub const fn as_str(self) -> &'static str {
         match self {
-            ArithmeticOpKind::Add => "+",
-            ArithmeticOpKind::Sub => "-",
-            ArithmeticOpKind::And => "&",
-            ArithmeticOpKind::Or => "|",
-            ArithmeticOpKind::Xor => "^",
-            ArithmeticOpKind::Not => "!",
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::And => "&",
+            Self::Or => "|",
+            Self::Xor => "^",
+            Self::Not => "!",
+            Self::ShiftLeft => "<<",
+            Self::ShiftRight => ">>",
+            Self::ShiftArithmeticLeft => "<<s",
+            Self::ShiftArithmeticRight => ">>s",
+            Self::RotateLeft => "<<r",
+            Self::RotateRight => ">>r",
+            Self::RotateWithCarryLeft => "<<rc",
+            Self::RotateWithCarryRight => ">>rc",
+            Self::ShiftPreciseLeft => "shift_left_from",
+            Self::ShiftPreciseRight => "shift_right_from",
         }
     }
 }
@@ -1363,6 +1397,10 @@ fn lift_arithmetic(instr: Instruction) -> Option<SemanticInstruction> {
         .or_else(|| lift_inc_dec(instr))
         .or_else(|| lift_and_or_xor(instr))
         .or_else(|| lift_not(instr))
+        .or_else(|| lift_shl_shr_sal_sar(instr))
+        .or_else(|| lift_rol_ror_rcl_rcr(instr))
+        .or_else(|| lift_shld_shrd(instr))
+        .map(SemanticInstruction::Arithmetic)
 }
 
 fn lift_sized_mem_or_reg_from_2ops(
@@ -1395,14 +1433,14 @@ fn lift_short_arith_expression(instr: &Instruction) -> Option<ArithmeticOperands
     })
 }
 
-fn lift_add_sub(instr: Instruction) -> Option<SemanticInstruction> {
+fn lift_add_sub(instr: Instruction) -> Option<ArithmeticInstruction> {
     let kind = match instr.mnemonic() {
         Mnemonic::Add => ArithmeticOpKind::Add,
         Mnemonic::Sub => ArithmeticOpKind::Sub,
         _ => return None,
     };
 
-    Some(SemanticInstruction::Arithmetic(ArithmeticInstruction {
+    Some(ArithmeticInstruction {
         operands: lift_short_arith_expression(&instr)?,
         flags_effect: FlagsEffect {
             written: Flags::ZERO
@@ -1414,17 +1452,17 @@ fn lift_add_sub(instr: Instruction) -> Option<SemanticInstruction> {
             ..FlagsEffect::NONE
         },
         kind,
-    }))
+    })
 }
 
-fn lift_inc_dec(instr: Instruction) -> Option<SemanticInstruction> {
+fn lift_inc_dec(instr: Instruction) -> Option<ArithmeticInstruction> {
     let kind = match instr.mnemonic() {
         Mnemonic::Inc => ArithmeticOpKind::Add,
         Mnemonic::Dec => ArithmeticOpKind::Sub,
         _ => return None,
     };
 
-    Some(SemanticInstruction::Arithmetic(ArithmeticInstruction {
+    Some(ArithmeticInstruction {
         operands: ArithmeticOperands::ShortExpression {
             result: lift_sized_mem_or_reg_from_2ops(&instr, 0)?,
             left: lift_operand(&instr, 0)?,
@@ -1439,10 +1477,10 @@ fn lift_inc_dec(instr: Instruction) -> Option<SemanticInstruction> {
             ..FlagsEffect::NONE
         },
         kind,
-    }))
+    })
 }
 
-fn lift_and_or_xor(instr: Instruction) -> Option<SemanticInstruction> {
+fn lift_and_or_xor(instr: Instruction) -> Option<ArithmeticInstruction> {
     let kind = match instr.mnemonic() {
         Mnemonic::And => ArithmeticOpKind::And,
         Mnemonic::Or => ArithmeticOpKind::Or,
@@ -1450,7 +1488,7 @@ fn lift_and_or_xor(instr: Instruction) -> Option<SemanticInstruction> {
         _ => return None,
     };
 
-    Some(SemanticInstruction::Arithmetic(ArithmeticInstruction {
+    Some(ArithmeticInstruction {
         operands: lift_short_arith_expression(&instr)?,
         flags_effect: FlagsEffect {
             read: Flags::empty(),
@@ -1460,15 +1498,15 @@ fn lift_and_or_xor(instr: Instruction) -> Option<SemanticInstruction> {
             set_values: Flags::empty(),
         },
         kind,
-    }))
+    })
 }
 
-fn lift_not(instr: Instruction) -> Option<SemanticInstruction> {
+fn lift_not(instr: Instruction) -> Option<ArithmeticInstruction> {
     if instr.mnemonic() != Mnemonic::Not {
         return None;
     };
 
-    Some(SemanticInstruction::Arithmetic(ArithmeticInstruction {
+    Some(ArithmeticInstruction {
         operands: ArithmeticOperands::ShortExpression {
             result: lift_sized_mem_or_reg_from_2ops(&instr, 0)?,
             left: lift_operand(&instr, 0)?,
@@ -1476,5 +1514,68 @@ fn lift_not(instr: Instruction) -> Option<SemanticInstruction> {
         },
         flags_effect: FlagsEffect::NONE,
         kind: ArithmeticOpKind::Not,
-    }))
+    })
+}
+
+fn lift_shl_shr_sal_sar(instr: Instruction) -> Option<ArithmeticInstruction> {
+    let kind = match instr.mnemonic() {
+        Mnemonic::Shl => ArithmeticOpKind::ShiftLeft,
+        Mnemonic::Shr => ArithmeticOpKind::ShiftRight,
+        Mnemonic::Sal => ArithmeticOpKind::ShiftArithmeticLeft,
+        Mnemonic::Sar => ArithmeticOpKind::ShiftArithmeticRight,
+        _ => return None,
+    };
+
+    Some(ArithmeticInstruction {
+        operands: lift_short_arith_expression(&instr)?,
+        flags_effect: FlagsEffect {
+            written: Flags::CARRY | Flags::OVERFLOW | Flags::ZERO | Flags::SIGN | Flags::PARITY,
+            undefined: Flags::AUXILLIARY_OVERFLOW,
+            ..FlagsEffect::NONE
+        },
+        kind,
+    })
+}
+
+fn lift_rol_ror_rcl_rcr(instr: Instruction) -> Option<ArithmeticInstruction> {
+    let kind = match instr.mnemonic() {
+        Mnemonic::Rol => ArithmeticOpKind::RotateLeft,
+        Mnemonic::Ror => ArithmeticOpKind::RotateRight,
+        Mnemonic::Rcl => ArithmeticOpKind::RotateWithCarryLeft,
+        Mnemonic::Rcr => ArithmeticOpKind::RotateWithCarryRight,
+        _ => return None,
+    };
+
+    Some(ArithmeticInstruction {
+        operands: lift_short_arith_expression(&instr)?,
+        flags_effect: FlagsEffect {
+            written: Flags::CARRY | Flags::OVERFLOW,
+            ..FlagsEffect::NONE
+        },
+        kind,
+    })
+}
+
+fn lift_shld_shrd(instr: Instruction) -> Option<ArithmeticInstruction> {
+    let kind = match instr.mnemonic() {
+        Mnemonic::Shld => ArithmeticOpKind::ShiftPreciseLeft,
+        Mnemonic::Shrd => ArithmeticOpKind::ShiftPreciseRight,
+        _ => return None,
+    };
+
+    Some(ArithmeticInstruction {
+        operands: ArithmeticOperands::TernaryExpression {
+            // NOTE(hack3rmann): 2 ops to check is fine, because the third is always an immediate
+            result: lift_sized_mem_or_reg_from_2ops(&instr, 0)?,
+            first: lift_operand(&instr, 0)?,
+            second: lift_operand(&instr, 1)?,
+            third: lift_operand(&instr, 2)?,
+        },
+        flags_effect: FlagsEffect {
+            written: Flags::CARRY | Flags::OVERFLOW | Flags::ZERO | Flags::SIGN | Flags::PARITY,
+            undefined: Flags::AUXILLIARY_OVERFLOW,
+            ..FlagsEffect::NONE
+        },
+        kind,
+    })
 }

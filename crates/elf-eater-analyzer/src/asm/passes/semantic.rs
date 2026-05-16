@@ -316,32 +316,6 @@ pub enum ExtendedBinaryOpKind {
     Idiv,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum UnaryOpKind {
-    #[default]
-    Neg,
-    Inv,
-    Inc,
-    Dec,
-}
-
-impl UnaryOpKind {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            UnaryOpKind::Neg => "neg",
-            UnaryOpKind::Inv => "inv",
-            UnaryOpKind::Inc => "inc",
-            UnaryOpKind::Dec => "dec",
-        }
-    }
-}
-
-impl Display for UnaryOpKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RegOrMemory {
     Reg(Register64),
@@ -1041,7 +1015,6 @@ pub enum ArithmeticOpKind {
     Not,
     ShiftLeft,
     ShiftRight,
-    ShiftArithmeticLeft,
     ShiftArithmeticRight,
     RotateLeft,
     RotateRight,
@@ -1062,7 +1035,6 @@ impl ArithmeticOpKind {
             Self::Not => "!",
             Self::ShiftLeft => "<<",
             Self::ShiftRight => ">>",
-            Self::ShiftArithmeticLeft => "<<s",
             Self::ShiftArithmeticRight => ">>s",
             Self::RotateLeft => "<<r",
             Self::RotateRight => ">>r",
@@ -1521,7 +1493,7 @@ fn lift_shl_shr_sal_sar(instr: Instruction) -> Option<ArithmeticInstruction> {
     let kind = match instr.mnemonic() {
         Mnemonic::Shl => ArithmeticOpKind::ShiftLeft,
         Mnemonic::Shr => ArithmeticOpKind::ShiftRight,
-        Mnemonic::Sal => ArithmeticOpKind::ShiftArithmeticLeft,
+        Mnemonic::Sal => ArithmeticOpKind::ShiftLeft,
         Mnemonic::Sar => ArithmeticOpKind::ShiftArithmeticRight,
         _ => return None,
     };

@@ -1,4 +1,4 @@
-use iced_x86::{Formatter, Instruction, Mnemonic, NasmFormatter, OpKind, Register};
+use iced_x86::{Formatter, Instruction, MemorySize, Mnemonic, NasmFormatter, OpKind, Register};
 use std::{
     fmt::{self, Display},
     num::NonZeroU16,
@@ -32,6 +32,12 @@ pub enum SemanticInstruction {
         destination: GpRegister,
         source: MemoryExpression,
     },
+    /// `movzx reg_any, mem` or `mov reg32, mem`
+    LoadZeroExtend {
+        destination: GpRegister,
+        source: MemoryExpression,
+        source_size: PointerSize,
+    },
     /// `mov mem, reg_any`
     Store {
         destination: MemoryExpression,
@@ -42,6 +48,11 @@ pub enum SemanticInstruction {
         slice: RegisterSliceKind,
         destination: Register64,
         source: Register64,
+    },
+    /// `movzx reg_any, reg_any` or `mov reg32, reg_any`
+    AssignmentZeroExtend {
+        destination: GpRegister,
+        source: GpRegister,
     },
     /// `lea reg64, [expr]`
     LoadAddress {
@@ -128,13 +139,22 @@ impl SemanticInstruction {
                 destination,
                 source,
             } => {
-                write!(buf, "mov {destination}, {source}").unwrap();
+                let size = PointerSize::from(destination.slice_kind);
+                write!(buf, "mov {destination}, {size} {source}").unwrap();
+            }
+            &SemanticInstruction::LoadZeroExtend {
+                destination,
+                source,
+                source_size,
+            } => {
+                write!(buf, "movzx {destination}, {source_size} {source}").unwrap();
             }
             SemanticInstruction::Store {
                 destination,
                 source,
             } => {
-                write!(buf, "mov {destination}, {source}").unwrap();
+                let size = PointerSize::from(source.slice_kind);
+                write!(buf, "mov {size} {destination}, {source}").unwrap();
             }
             &SemanticInstruction::Assignment {
                 slice,
@@ -146,6 +166,12 @@ impl SemanticInstruction {
 
                 write!(buf, "mov {destination}, {source}").unwrap();
             }
+            SemanticInstruction::AssignmentZeroExtend {
+                destination,
+                source,
+            } => {
+                write!(buf, "movzx {destination}, {source}").unwrap();
+            }
             SemanticInstruction::LoadAddress { destination, expr } => {
                 write!(buf, "lea {destination}, {expr}").unwrap();
             }
@@ -154,6 +180,8 @@ impl SemanticInstruction {
                 first,
                 second,
             } => {
+                let size = PointerSize::from(slice);
+
                 match (first, second) {
                     (RegOrMemory::Reg(reg1), RegOrMemory::Reg(reg2)) => {
                         let first = GpRegister::new(reg1, slice);
@@ -165,11 +193,11 @@ impl SemanticInstruction {
                     | (RegOrMemory::Mem(mem), RegOrMemory::Reg(reg)) => {
                         let reg = GpRegister::new(reg, slice);
 
-                        write!(buf, "xchg {reg}, {mem}").unwrap();
+                        write!(buf, "xchg {reg}, {size} {mem}").unwrap();
                     }
                     (RegOrMemory::Mem(mem1), RegOrMemory::Mem(mem2)) => {
                         // NOTE: unreachable actually
-                        write!(buf, "xchg {mem1}, {mem2}").unwrap();
+                        write!(buf, "xchg {size} {mem1}, {size} {mem2}").unwrap();
                     }
                 }
             }
@@ -226,6 +254,7 @@ impl From<Instruction> for SemanticInstruction {
         lift_call(instr)
             .or_else(|| lift_ret(instr))
             .or_else(|| lift_mov(instr))
+            .or_else(|| lift_movzx(instr))
             .or_else(|| lift_lea(instr))
             .or_else(|| lift_xchg(instr))
             .or_else(|| lift_push(instr))
@@ -420,6 +449,35 @@ impl PointerSize {
     }
 }
 
+impl From<RegisterSliceKind> for PointerSize {
+    fn from(value: RegisterSliceKind) -> Self {
+        match value {
+            RegisterSliceKind::R64 => Self::Qword,
+            RegisterSliceKind::R32 => Self::Dword,
+            RegisterSliceKind::R16 => Self::Word,
+            RegisterSliceKind::H8 | RegisterSliceKind::L8 => Self::Byte,
+        }
+    }
+}
+
+impl TryFrom<MemorySize> for PointerSize {
+    type Error = ();
+
+    fn try_from(value: MemorySize) -> Result<Self, Self::Error> {
+        Ok(match value.size() {
+            1 => Self::Byte,
+            2 => Self::Word,
+            4 => Self::Dword,
+            8 => Self::Qword,
+            10 => Self::Tword,
+            16 => Self::XmmWord,
+            32 => Self::YmmWord,
+            64 => Self::ZmmWord,
+            _ => return Err(()),
+        })
+    }
+}
+
 impl Display for PointerSize {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -579,6 +637,10 @@ pub struct GpRegister {
 impl GpRegister {
     pub const fn new(full: Register64, slice_kind: RegisterSliceKind) -> Self {
         Self { full, slice_kind }
+    }
+
+    pub const fn with_slice(self, slice_kind: RegisterSliceKind) -> Self {
+        Self::new(self.full, slice_kind)
     }
 
     pub const fn as_str(self) -> &'static str {
@@ -909,19 +971,47 @@ fn lift_mov(instr: Instruction) -> Option<SemanticInstruction> {
     }
 
     Some(match (instr.op0_kind(), instr.op1_kind()) {
-        (OpKind::Register, OpKind::Memory) => SemanticInstruction::Load {
-            destination: GpRegister::try_from(instr.op0_register()).ok()?,
-            source: lift_memory(&instr)?,
-        },
+        (OpKind::Register, OpKind::Memory) => {
+            let destination = GpRegister::try_from(instr.op0_register()).ok()?;
+            let source = lift_memory(&instr)?;
+
+            // Zero extending 32-bit mov
+            if destination.slice_kind == RegisterSliceKind::R32 {
+                SemanticInstruction::LoadZeroExtend {
+                    destination: destination.with_slice(RegisterSliceKind::R64),
+                    source,
+                    source_size: PointerSize::Dword,
+                }
+            } else {
+                SemanticInstruction::Load {
+                    destination,
+                    source,
+                }
+            }
+        }
         (OpKind::Memory, OpKind::Register) => SemanticInstruction::Store {
             destination: lift_memory(&instr)?,
             source: GpRegister::try_from(instr.op1_register()).ok()?,
         },
-        (OpKind::Register, OpKind::Register) => SemanticInstruction::Assignment {
-            slice: RegisterSliceKind::try_from(instr.op0_register()).ok()?,
-            destination: Register64::try_from(instr.op0_register()).ok()?,
-            source: Register64::try_from(instr.op1_register()).ok()?,
-        },
+        (OpKind::Register, OpKind::Register) => {
+            let slice = RegisterSliceKind::try_from(instr.op0_register()).ok()?;
+            let destination = Register64::try_from(instr.op0_register()).ok()?;
+            let source = Register64::try_from(instr.op1_register()).ok()?;
+
+            // Zero extending 32-bit mov
+            if slice == RegisterSliceKind::R32 {
+                SemanticInstruction::AssignmentZeroExtend {
+                    destination: GpRegister::new(destination, RegisterSliceKind::R64),
+                    source: GpRegister::new(source, RegisterSliceKind::R32),
+                }
+            } else {
+                SemanticInstruction::Assignment {
+                    slice,
+                    destination,
+                    source,
+                }
+            }
+        }
         _ => return None,
     })
 }
@@ -1100,5 +1190,26 @@ fn lift_test(instr: Instruction) -> Option<SemanticInstruction> {
     Some(SemanticInstruction::Test {
         left: lift_operand(&instr, 0)?,
         right: lift_operand(&instr, 1)?,
+    })
+}
+
+fn lift_movzx(instr: Instruction) -> Option<SemanticInstruction> {
+    if instr.mnemonic() != Mnemonic::Movzx {
+        return None;
+    }
+
+    let destination = GpRegister::try_from(instr.op0_register()).ok()?;
+
+    Some(match instr.op1_kind() {
+        OpKind::Register => SemanticInstruction::AssignmentZeroExtend {
+            destination,
+            source: GpRegister::try_from(instr.op1_register()).ok()?,
+        },
+        OpKind::Memory => SemanticInstruction::LoadZeroExtend {
+            destination,
+            source: lift_memory(&instr)?,
+            source_size: PointerSize::try_from(instr.memory_size()).ok()?,
+        },
+        _ => return None,
     })
 }

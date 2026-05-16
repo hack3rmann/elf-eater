@@ -1,3 +1,4 @@
+use bitflags::bitflags;
 use iced_x86::{Formatter, Instruction, MemorySize, Mnemonic, NasmFormatter, OpKind, Register};
 use std::{
     fmt::{self, Display},
@@ -112,17 +113,7 @@ pub enum SemanticInstruction {
         slice: RegisterSliceKind,
         operand: RegOrMemory,
     },
-    BinaryOp {
-        // TODO(hack3rmann): operand sizes
-        kind: BinaryOpKind,
-        destination: RegOrMemory,
-        left: Operand,
-        right: Operand,
-    },
-    UnaryOp {
-        kind: UnaryOpKind,
-        operand: RegOrMemory,
-    },
+    Arithmetic(ArithmeticInstruction),
     Other(Instruction),
 }
 
@@ -255,16 +246,8 @@ impl SemanticInstruction {
                     write!(buf, "pop {mem}").unwrap();
                 }
             },
-            SemanticInstruction::BinaryOp {
-                kind,
-                destination,
-                left,
-                right,
-            } => {
-                write!(buf, "{kind} {destination}, {left}, {right}").unwrap();
-            }
-            SemanticInstruction::UnaryOp { kind, operand } => {
-                write!(buf, "{kind} {operand}").unwrap();
+            SemanticInstruction::Arithmetic(instruction) => {
+                write!(buf, "{instruction}").unwrap();
             }
             SemanticInstruction::Other(instruction) => {
                 formatter.format(instruction, buf);
@@ -286,47 +269,30 @@ impl From<Instruction> for SemanticInstruction {
             .or_else(|| lift_pop(instr))
             .or_else(|| lift_jump(instr))
             .or_else(|| lift_jcc(instr))
-            .or_else(|| lift_binary_op(instr))
             .or_else(|| lift_test(instr))
             .or_else(|| lift_cmp(instr))
+            .or_else(|| lift_arithmetic(instr))
             .unwrap_or(SemanticInstruction::Other(instr))
     }
 }
 
+bitflags! {
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct Flags: u8 {
+        const ZERO = 1 << 0;
+        const CARRY = 1 << 1;
+        const SIGN = 1 << 2;
+        const OVERFLOW = 1 << 3;
+        const PARITY = 1 << 4;
+        const AUXILLIARY_OVERFLOW = 1 << 5;
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum BinaryOpKind {
-    #[default]
-    Add,
-    Sub,
-    Mul,
-    Imul,
-    Xor,
-    And,
-    Or,
-    Shl,
-    Shr,
-}
-
-impl BinaryOpKind {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            BinaryOpKind::Add => "add",
-            BinaryOpKind::Sub => "sub",
-            BinaryOpKind::Mul => "mul",
-            BinaryOpKind::Imul => "imul",
-            BinaryOpKind::Xor => "xor",
-            BinaryOpKind::And => "and",
-            BinaryOpKind::Or => "or",
-            BinaryOpKind::Shl => "shl",
-            BinaryOpKind::Shr => "shr",
-        }
-    }
-}
-
-impl Display for BinaryOpKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
+pub struct FlagsEffect {
+    pub read: Flags,
+    pub modified: Flags,
+    pub undefined: Flags,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -375,6 +341,36 @@ impl Display for RegOrMemory {
         match self {
             RegOrMemory::Reg(gp_register) => gp_register.fmt(f),
             RegOrMemory::Mem(memory_expression) => memory_expression.fmt(f),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SizedRegOrMemory {
+    Reg(GpRegister),
+    Mem {
+        size: PointerSize,
+        expr: MemoryExpression,
+    },
+}
+
+impl SizedRegOrMemory {
+    pub fn new(reg_or_mem: RegOrMemory, slice: RegisterSliceKind) -> Self {
+        match reg_or_mem {
+            RegOrMemory::Reg(reg) => Self::Reg(GpRegister::new(reg, slice)),
+            RegOrMemory::Mem(expr) => Self::Mem {
+                size: PointerSize::from(slice),
+                expr,
+            },
+        }
+    }
+}
+
+impl Display for SizedRegOrMemory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SizedRegOrMemory::Reg(gp_register) => gp_register.fmt(f),
+            SizedRegOrMemory::Mem { size, expr } => write!(f, "{size} {expr}"),
         }
     }
 }
@@ -922,6 +918,99 @@ impl TryFrom<Register> for RegisterSliceKind {
     }
 }
 
+impl TryFrom<MemorySize> for RegisterSliceKind {
+    type Error = ();
+
+    fn try_from(value: MemorySize) -> Result<Self, Self::Error> {
+        Ok(match value.size() {
+            1 => Self::L8,
+            2 => Self::R16,
+            4 => Self::R32,
+            8 => Self::R64,
+            _ => return Err(()),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ArithmeticInstruction {
+    pub operands: ArithmeticOperands,
+    pub flags_effect: FlagsEffect,
+    pub kind: ArithmeticOpKind,
+}
+
+impl Display for ArithmeticInstruction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let op = self.kind.as_str();
+
+        match self.operands {
+            ArithmeticOperands::ShortExpression {
+                result,
+                left,
+                right,
+            } => {
+                write!(f, "{result} = {left} {op} {right}")
+            }
+            ArithmeticOperands::ResultExtendedExpression {
+                result_hi,
+                result_lo,
+                left,
+                right,
+            } => {
+                write!(f, "({result_hi}, {result_lo}) = {left} {op} {right}")
+            }
+            ArithmeticOperands::OperandExtendedExpression {
+                result,
+                left_hi,
+                left_lo,
+                right_hi,
+                right_lo,
+            } => {
+                write!(
+                    f,
+                    "{result} = ({left_hi}, {left_lo}) {op} ({right_hi}, {right_lo})"
+                )
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ArithmeticOperands {
+    ShortExpression {
+        result: SizedRegOrMemory,
+        left: Operand,
+        right: Operand,
+    },
+    ResultExtendedExpression {
+        result_hi: SizedRegOrMemory,
+        result_lo: SizedRegOrMemory,
+        left: Operand,
+        right: Operand,
+    },
+    OperandExtendedExpression {
+        result: SizedRegOrMemory,
+        left_hi: Operand,
+        left_lo: Operand,
+        right_hi: Operand,
+        right_lo: Operand,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ArithmeticOpKind {
+    #[default]
+    Add,
+}
+
+impl ArithmeticOpKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ArithmeticOpKind::Add => "+",
+        }
+    }
+}
+
 fn lift_memory(instr: &Instruction) -> Option<MemoryExpression> {
     if instr.memory_base() == Register::RIP {
         return Some(MemoryExpression::Relative {
@@ -1053,9 +1142,15 @@ fn lift_operand(instr: &Instruction, op: u32) -> Option<Operand> {
     Some(match instr.op_kind(op) {
         OpKind::Register => Operand::Register(GpRegister::try_from(instr.op_register(op)).ok()?),
         OpKind::Memory => Operand::Memory(lift_memory(instr)?),
-        OpKind::Immediate8 | OpKind::Immediate16 | OpKind::Immediate32 | OpKind::Immediate64 => {
-            Operand::Const(instr.immediate64())
-        }
+        OpKind::Immediate8
+        | OpKind::Immediate16
+        | OpKind::Immediate32
+        | OpKind::Immediate64
+        | OpKind::Immediate8_2nd
+        | OpKind::Immediate8to16
+        | OpKind::Immediate8to32
+        | OpKind::Immediate8to64
+        | OpKind::Immediate32to64 => Operand::Const(instr.immediate64()),
         _ => return None,
     })
 }
@@ -1170,32 +1265,6 @@ fn lift_pop(instr: Instruction) -> Option<SemanticInstruction> {
     })
 }
 
-fn lift_binop_kind(mnemonic: Mnemonic) -> Option<BinaryOpKind> {
-    use BinaryOpKind::*;
-
-    Some(match mnemonic {
-        Mnemonic::Add => Add,
-        Mnemonic::Sub => Sub,
-        Mnemonic::Imul => Imul,
-        Mnemonic::Mul => Mul,
-        Mnemonic::Xor => Xor,
-        Mnemonic::And => And,
-        Mnemonic::Or => Or,
-        Mnemonic::Shl => Shl,
-        Mnemonic::Shr => Shr,
-        _ => return None,
-    })
-}
-
-fn lift_binary_op(instr: Instruction) -> Option<SemanticInstruction> {
-    Some(SemanticInstruction::BinaryOp {
-        kind: lift_binop_kind(instr.mnemonic())?,
-        destination: lift_reg_or_mem(&instr, 0)?,
-        left: lift_operand(&instr, 1)?,
-        right: lift_operand(&instr, 2)?,
-    })
-}
-
 fn lift_cmp(instr: Instruction) -> Option<SemanticInstruction> {
     if instr.mnemonic() != Mnemonic::Cmp {
         return None;
@@ -1258,4 +1327,55 @@ fn lift_movsx(instr: Instruction) -> Option<SemanticInstruction> {
         },
         _ => return None,
     })
+}
+
+fn lift_arithmetic(instr: Instruction) -> Option<SemanticInstruction> {
+    lift_add(instr)
+}
+
+fn lift_sized_mem_or_reg_from_2ops(
+    instr: &Instruction,
+    operand_index: u32,
+) -> Option<SizedRegOrMemory> {
+    let result_unsized = lift_reg_or_mem(instr, operand_index)?;
+
+    let slice = match (instr.op0_kind(), instr.op1_kind()) {
+        (OpKind::Register, kind) if kind != OpKind::Memory => {
+            RegisterSliceKind::try_from(instr.op0_register()).ok()?
+        }
+        (kind, OpKind::Register) if kind != OpKind::Memory => {
+            RegisterSliceKind::try_from(instr.op1_register()).ok()?
+        }
+        (OpKind::Memory, _) | (_, OpKind::Memory) => {
+            RegisterSliceKind::try_from(instr.memory_size()).ok()?
+        }
+        _ => return None,
+    };
+
+    Some(SizedRegOrMemory::new(result_unsized, slice))
+}
+
+fn lift_add(instr: Instruction) -> Option<SemanticInstruction> {
+    if instr.mnemonic() != Mnemonic::Add {
+        return None;
+    }
+
+    Some(SemanticInstruction::Arithmetic(ArithmeticInstruction {
+        operands: ArithmeticOperands::ShortExpression {
+            result: lift_sized_mem_or_reg_from_2ops(&instr, 0)?,
+            left: lift_operand(&instr, 0)?,
+            right: lift_operand(&instr, 1)?,
+        },
+        flags_effect: FlagsEffect {
+            read: Flags::empty(),
+            modified: Flags::ZERO
+                | Flags::CARRY
+                | Flags::SIGN
+                | Flags::OVERFLOW
+                | Flags::PARITY
+                | Flags::AUXILLIARY_OVERFLOW,
+            undefined: Flags::empty(),
+        },
+        kind: ArithmeticOpKind::Add,
+    }))
 }

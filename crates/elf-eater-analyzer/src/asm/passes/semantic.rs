@@ -134,7 +134,7 @@ impl SemanticInstruction {
                 write!(buf, "call qword {expr}").unwrap();
             }
             SemanticInstruction::Return => {
-                buf.write_str("ret").unwrap();
+                buf.push_str("ret");
             }
             SemanticInstruction::ReturnClear { amount } => {
                 write!(buf, "ret 0x{amount:x}").unwrap();
@@ -359,6 +359,13 @@ impl SizedRegOrMemory {
                 size: PointerSize::from(slice),
                 expr,
             },
+        }
+    }
+
+    pub fn size(&self) -> PointerSize {
+        match self {
+            SizedRegOrMemory::Reg(reg) => reg.slice_kind.into(),
+            SizedRegOrMemory::Mem { size, expr: _ } => *size,
         }
     }
 }
@@ -977,6 +984,20 @@ impl TryFrom<MemorySize> for RegisterSliceKind {
     }
 }
 
+impl TryFrom<PointerSize> for RegisterSliceKind {
+    type Error = ();
+
+    fn try_from(value: PointerSize) -> Result<Self, Self::Error> {
+        Ok(match value {
+            PointerSize::Byte => Self::L8,
+            PointerSize::Word => Self::R16,
+            PointerSize::Dword => Self::R32,
+            PointerSize::Qword => Self::R64,
+            _ => return Err(()),
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ArithmeticInstruction {
     pub operands: ArithmeticOperands,
@@ -1068,6 +1089,8 @@ pub enum ArithmeticOpKind {
     #[default]
     Add,
     Sub,
+    Mul,
+    Imul,
     And,
     Or,
     Xor,
@@ -1088,6 +1111,8 @@ impl ArithmeticOpKind {
         match self {
             Self::Add => "+",
             Self::Sub => "-",
+            Self::Mul => "*",
+            Self::Imul => "*s",
             Self::And => "&",
             Self::Or => "|",
             Self::Xor => "^",
@@ -1477,6 +1502,9 @@ fn lift_movsx(instr: Instruction) -> Option<SemanticInstruction> {
 fn lift_arithmetic(instr: Instruction) -> Option<SemanticInstruction> {
     lift_add_sub(instr)
         .or_else(|| lift_inc_dec(instr))
+        .or_else(|| lift_mul_imul_1op(instr))
+        .or_else(|| lift_imul_2ops(instr))
+        .or_else(|| lift_imul_3ops(instr))
         .or_else(|| lift_and_or_xor(instr))
         .or_else(|| lift_not(instr))
         .or_else(|| lift_shl_shr_sal_sar(instr))
@@ -1502,6 +1530,21 @@ fn lift_sized_mem_or_reg_from_2ops(
         (OpKind::Memory, _) | (_, OpKind::Memory) => {
             RegisterSliceKind::try_from(instr.memory_size()).ok()?
         }
+        _ => return None,
+    };
+
+    Some(SizedRegOrMemory::new(result_unsized, slice))
+}
+
+fn lift_sized_mem_or_reg_from_1op(
+    instr: &Instruction,
+    operand_index: u32,
+) -> Option<SizedRegOrMemory> {
+    let result_unsized = lift_reg_or_mem(instr, operand_index)?;
+
+    let slice = match instr.op0_kind() {
+        OpKind::Register => RegisterSliceKind::try_from(instr.op0_register()).ok()?,
+        OpKind::Memory => RegisterSliceKind::try_from(instr.memory_size()).ok()?,
         _ => return None,
     };
 
@@ -1535,6 +1578,126 @@ fn lift_add_sub(instr: Instruction) -> Option<ArithmeticInstruction> {
             ..FlagsEffect::NONE
         },
         kind,
+    })
+}
+
+fn lift_mul_imul_1op(instr: Instruction) -> Option<ArithmeticInstruction> {
+    let kind = match instr.mnemonic() {
+        Mnemonic::Mul => ArithmeticOpKind::Mul,
+        Mnemonic::Imul => ArithmeticOpKind::Imul,
+        _ => return None,
+    };
+
+    if instr.op_count() != 1 {
+        return None;
+    }
+
+    let explicit_op = lift_sized_mem_or_reg_from_1op(&instr, 0)?;
+
+    let implicit_op_slice = RegisterSliceKind::try_from(explicit_op.size()).ok()?;
+    let implicit_op = GpRegister::new(Register64::Rax, implicit_op_slice);
+
+    let left = Operand::Register(implicit_op);
+    let right = Operand::from(explicit_op);
+
+    let operands = match implicit_op_slice {
+        RegisterSliceKind::R64 => ArithmeticOperands::ResultExtendedExpression {
+            result_hi: SizedRegOrMemory::Reg(GpRegister::new(
+                Register64::Rdx,
+                RegisterSliceKind::R64,
+            )),
+            result_lo: SizedRegOrMemory::Reg(GpRegister::new(
+                Register64::Rax,
+                RegisterSliceKind::R64,
+            )),
+            left,
+            right,
+        },
+        RegisterSliceKind::R32 => ArithmeticOperands::ResultExtendedExpression {
+            result_hi: SizedRegOrMemory::Reg(GpRegister::new(
+                Register64::Rdx,
+                RegisterSliceKind::R32,
+            )),
+            result_lo: SizedRegOrMemory::Reg(GpRegister::new(
+                Register64::Rax,
+                RegisterSliceKind::R32,
+            )),
+            left,
+            right,
+        },
+        RegisterSliceKind::R16 => ArithmeticOperands::ResultExtendedExpression {
+            result_hi: SizedRegOrMemory::Reg(GpRegister::new(
+                Register64::Rdx,
+                RegisterSliceKind::R16,
+            )),
+            result_lo: SizedRegOrMemory::Reg(GpRegister::new(
+                Register64::Rax,
+                RegisterSliceKind::R16,
+            )),
+            left,
+            right,
+        },
+        RegisterSliceKind::H8 | RegisterSliceKind::L8 => ArithmeticOperands::ShortExpression {
+            result: SizedRegOrMemory::Reg(GpRegister::new(Register64::Rax, RegisterSliceKind::R16)),
+            left,
+            right: Some(right),
+        },
+    };
+
+    Some(ArithmeticInstruction {
+        operands,
+        flags_effect: FlagsEffect {
+            written: Flags::CARRY | Flags::OVERFLOW,
+            undefined: Flags::ZERO | Flags::SIGN | Flags::PARITY | Flags::AUXILLIARY_OVERFLOW,
+            ..FlagsEffect::NONE
+        },
+        kind,
+    })
+}
+
+fn lift_imul_2ops(instr: Instruction) -> Option<ArithmeticInstruction> {
+    if instr.mnemonic() != Mnemonic::Imul || instr.op_count() != 2 {
+        return None;
+    }
+
+    let op1 = lift_sized_mem_or_reg_from_2ops(&instr, 0)?;
+
+    Some(ArithmeticInstruction {
+        operands: ArithmeticOperands::ShortExpression {
+            result: op1,
+            left: op1.into(),
+            right: Some(lift_operand(&instr, 1)?),
+        },
+        flags_effect: FlagsEffect {
+            written: Flags::CARRY | Flags::OVERFLOW,
+            undefined: Flags::ZERO | Flags::SIGN | Flags::PARITY | Flags::AUXILLIARY_OVERFLOW,
+            ..FlagsEffect::NONE
+        },
+        kind: ArithmeticOpKind::Imul,
+    })
+}
+
+fn lift_imul_3ops(instr: Instruction) -> Option<ArithmeticInstruction> {
+    if instr.mnemonic() != Mnemonic::Imul || instr.op_count() != 3 {
+        return None;
+    }
+
+    // NOTE(hack3rmann): it's fine to figure out the size only from first 2 operands, because the
+    // first is always a register
+    let result = lift_sized_mem_or_reg_from_2ops(&instr, 0)?;
+
+    Some(ArithmeticInstruction {
+        operands: ArithmeticOperands::ShortExpression {
+            result,
+            left: lift_operand(&instr, 1)?,
+            right: Some(lift_operand(&instr, 2)?),
+        },
+        flags_effect: FlagsEffect {
+            written: Flags::CARRY | Flags::OVERFLOW,
+            undefined: Flags::ZERO | Flags::SIGN | Flags::PARITY | Flags::AUXILLIARY_OVERFLOW,
+            ..FlagsEffect::NONE
+        },
+        kind: ArithmeticOpKind::Imul,
     })
 }
 

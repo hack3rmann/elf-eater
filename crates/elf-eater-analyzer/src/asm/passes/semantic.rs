@@ -708,6 +708,18 @@ pub struct GpRegister {
 }
 
 impl GpRegister {
+    pub const RAX: Self = Self::new(Register64::Rax, RegisterSliceKind::R64);
+    pub const EAX: Self = Self::new(Register64::Rax, RegisterSliceKind::R32);
+    pub const AX: Self = Self::new(Register64::Rax, RegisterSliceKind::R16);
+    pub const AH: Self = Self::new(Register64::Rax, RegisterSliceKind::H8);
+    pub const AL: Self = Self::new(Register64::Rax, RegisterSliceKind::L8);
+
+    pub const RDX: Self = Self::new(Register64::Rdx, RegisterSliceKind::R64);
+    pub const EDX: Self = Self::new(Register64::Rdx, RegisterSliceKind::R32);
+    pub const DX: Self = Self::new(Register64::Rdx, RegisterSliceKind::R16);
+    pub const DH: Self = Self::new(Register64::Rdx, RegisterSliceKind::H8);
+    pub const DL: Self = Self::new(Register64::Rdx, RegisterSliceKind::L8);
+
     pub const fn new(full: Register64, slice_kind: RegisterSliceKind) -> Self {
         Self { full, slice_kind }
     }
@@ -1041,15 +1053,15 @@ impl Display for ArithmeticInstruction {
                 write!(f, "({result_hi}, {result_lo}) = {left} {op} {right}")
             }
             ArithmeticOperands::OperandExtendedExpression {
-                result,
+                result_first,
+                result_second,
                 left_hi,
                 left_lo,
-                right_hi,
-                right_lo,
+                right,
             } => {
                 write!(
                     f,
-                    "{result} = ({left_hi}, {left_lo}) {op} ({right_hi}, {right_lo})"
+                    "({result_first}, {result_second}) = ({left_hi}, {left_lo}) {op} {right}"
                 )
             }
         }
@@ -1076,11 +1088,11 @@ pub enum ArithmeticOperands {
         right: Operand,
     },
     OperandExtendedExpression {
-        result: SizedRegOrMemory,
+        result_first: SizedRegOrMemory,
+        result_second: SizedRegOrMemory,
         left_hi: Operand,
         left_lo: Operand,
-        right_hi: Operand,
-        right_lo: Operand,
+        right: Operand,
     },
 }
 
@@ -1091,6 +1103,8 @@ pub enum ArithmeticOpKind {
     Sub,
     Mul,
     Imul,
+    Div,
+    Idiv,
     And,
     Or,
     Xor,
@@ -1113,6 +1127,8 @@ impl ArithmeticOpKind {
             Self::Sub => "-",
             Self::Mul => "*",
             Self::Imul => "*s",
+            Self::Div => "/",
+            Self::Idiv => "/s",
             Self::And => "&",
             Self::Or => "|",
             Self::Xor => "^",
@@ -1505,6 +1521,7 @@ fn lift_arithmetic(instr: Instruction) -> Option<SemanticInstruction> {
         .or_else(|| lift_mul_imul_1op(instr))
         .or_else(|| lift_imul_2ops(instr))
         .or_else(|| lift_imul_3ops(instr))
+        .or_else(|| lift_div_idiv(instr))
         .or_else(|| lift_and_or_xor(instr))
         .or_else(|| lift_not(instr))
         .or_else(|| lift_shl_shr_sal_sar(instr))
@@ -1602,43 +1619,25 @@ fn lift_mul_imul_1op(instr: Instruction) -> Option<ArithmeticInstruction> {
 
     let operands = match implicit_op_slice {
         RegisterSliceKind::R64 => ArithmeticOperands::ResultExtendedExpression {
-            result_hi: SizedRegOrMemory::Reg(GpRegister::new(
-                Register64::Rdx,
-                RegisterSliceKind::R64,
-            )),
-            result_lo: SizedRegOrMemory::Reg(GpRegister::new(
-                Register64::Rax,
-                RegisterSliceKind::R64,
-            )),
+            result_hi: SizedRegOrMemory::Reg(GpRegister::RDX),
+            result_lo: SizedRegOrMemory::Reg(GpRegister::RAX),
             left,
             right,
         },
         RegisterSliceKind::R32 => ArithmeticOperands::ResultExtendedExpression {
-            result_hi: SizedRegOrMemory::Reg(GpRegister::new(
-                Register64::Rdx,
-                RegisterSliceKind::R32,
-            )),
-            result_lo: SizedRegOrMemory::Reg(GpRegister::new(
-                Register64::Rax,
-                RegisterSliceKind::R32,
-            )),
+            result_hi: SizedRegOrMemory::Reg(GpRegister::EDX),
+            result_lo: SizedRegOrMemory::Reg(GpRegister::EAX),
             left,
             right,
         },
         RegisterSliceKind::R16 => ArithmeticOperands::ResultExtendedExpression {
-            result_hi: SizedRegOrMemory::Reg(GpRegister::new(
-                Register64::Rdx,
-                RegisterSliceKind::R16,
-            )),
-            result_lo: SizedRegOrMemory::Reg(GpRegister::new(
-                Register64::Rax,
-                RegisterSliceKind::R16,
-            )),
+            result_hi: SizedRegOrMemory::Reg(GpRegister::DX),
+            result_lo: SizedRegOrMemory::Reg(GpRegister::AX),
             left,
             right,
         },
         RegisterSliceKind::H8 | RegisterSliceKind::L8 => ArithmeticOperands::ShortExpression {
-            result: SizedRegOrMemory::Reg(GpRegister::new(Register64::Rax, RegisterSliceKind::R16)),
+            result: SizedRegOrMemory::Reg(GpRegister::AX),
             left,
             right: Some(right),
         },
@@ -1698,6 +1697,41 @@ fn lift_imul_3ops(instr: Instruction) -> Option<ArithmeticInstruction> {
             ..FlagsEffect::NONE
         },
         kind: ArithmeticOpKind::Imul,
+    })
+}
+
+fn lift_div_idiv(instr: Instruction) -> Option<ArithmeticInstruction> {
+    let kind = match instr.mnemonic() {
+        Mnemonic::Div => ArithmeticOpKind::Div,
+        Mnemonic::Idiv => ArithmeticOpKind::Idiv,
+        _ => return None,
+    };
+
+    let explicit_op = lift_sized_mem_or_reg_from_1op(&instr, 0)?;
+
+    let implicit_op_slice = RegisterSliceKind::try_from(explicit_op.size()).ok()?;
+
+    let left_lo = GpRegister::new(Register64::Rax, implicit_op_slice);
+    let left_hi = match implicit_op_slice {
+        RegisterSliceKind::R64 | RegisterSliceKind::R32 | RegisterSliceKind::R16 => {
+            GpRegister::new(Register64::Rdx, implicit_op_slice)
+        }
+        RegisterSliceKind::H8 | RegisterSliceKind::L8 => GpRegister::AH,
+    };
+
+    Some(ArithmeticInstruction {
+        operands: ArithmeticOperands::OperandExtendedExpression {
+            result_first: SizedRegOrMemory::Reg(left_hi),
+            result_second: SizedRegOrMemory::Reg(left_lo),
+            left_hi: Operand::Register(left_hi),
+            left_lo: Operand::Register(left_lo),
+            right: explicit_op.into(),
+        },
+        flags_effect: FlagsEffect {
+            undefined: Flags::all(),
+            ..FlagsEffect::NONE
+        },
+        kind,
     })
 }
 

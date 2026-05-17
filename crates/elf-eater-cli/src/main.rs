@@ -1,13 +1,15 @@
 use elf_eater_analyzer::{
     asm::passes::{
         code_flow::{BlockIndex, CodeBlockTerminator, FunctionCodeFlow},
-        references::{FunctionLuts, ReferencingInstruction, SymType},
+        references::{FunctionLuts, ReferencingInstruction},
+        semantic::{ArithmeticInstruction, ArithmeticOpKind, SemanticInstruction},
     },
     context::DisassemblerContext,
 };
-use iced_x86::NasmFormatter;
+use iced_x86::{Mnemonic, NasmFormatter};
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 
+#[allow(unused)]
 fn walk_references(
     ctx: &DisassemblerContext,
     luts: &FunctionLuts,
@@ -89,36 +91,33 @@ fn main() {
     let ctx = DisassemblerContext::read("/home/hack3rmann/Downloads/libclntsh.so.12.1.0");
     let function_luts = FunctionLuts::new(&ctx);
 
-    let name = "kgumini";
-    let sym_va = function_luts.name_map[name];
+    for (name, &address) in &function_luts.name_map {
+        let Some(info) = function_luts.infos.get(&address) else {
+            continue;
+        };
 
-    let mut visited = HashSet::new();
-    let mut instruction_map = HashMap::new();
-
-    walk_references(
-        &ctx,
-        &function_luts,
-        &mut instruction_map,
-        &mut visited,
-        sym_va,
-        0,
-        &mut |ctx, _luts, depth, _parent_address, address| {
-            let sym = function_luts.symbol_map[&address];
-            let name = match sym.ty {
-                SymType::Regular => ctx.elf().strtab.get_at(sym.sym.st_name).unwrap(),
-                SymType::Dyn => ctx.elf().dynstrtab.get_at(sym.sym.st_name).unwrap(),
-            };
-
-            for _ in 0..depth {
-                print!(" ");
+        let div = info.instructions.iter().find(|instr| match instr {
+            SemanticInstruction::Arithmetic(ArithmeticInstruction {
+                kind: ArithmeticOpKind::Idiv,
+                ..
+            }) => true,
+            SemanticInstruction::Other(instruction) => {
+                matches!(instruction.mnemonic(), Mnemonic::Idiv)
             }
+            _ => false,
+        });
 
-            println!("{name}");
-        },
-    );
+        if div.is_some() {
+            eprintln!("found div in '{name}'");
+            break;
+        }
+    }
 
-    let name = "kghfnd";
+    // let name = "kgumini";
     // let name = "qctdccso";
+    // let name = "Java_oracle_streams_XStreamIn_XStreamInAttachNative"; // has div
+    // let name = "kghfnd"; // has imul
+    let name = "dbgtbUpdateBucketUtil"; // has idiv
     let sym_va = function_luts.name_map[name];
     let info = &function_luts.infos[&sym_va];
 

@@ -15,6 +15,7 @@ dependencies = [
  "bitflags",
  "goblin",
  "iced-x86",
+ "petgraph",
  "smallvec",
 ]
 

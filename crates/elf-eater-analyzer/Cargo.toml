@@ -12,3 +12,4 @@ goblin.workspace = true
 iced-x86.workspace = true
 smallvec.workspace = true
 bitflags.workspace = true
+petgraph.workspace = true

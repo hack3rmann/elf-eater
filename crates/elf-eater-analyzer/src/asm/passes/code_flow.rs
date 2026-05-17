@@ -9,19 +9,13 @@ use std::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CodeBlockTerminator {
-    Return {
-        instruction_index: u32,
-    },
+    Return,
     InternalJump {
-        instruction_index: u32,
         block_index: BlockIndex,
         address: u64,
     },
-    IndirectJump {
-        instruction_index: u32,
-    },
+    IndirectJump,
     ExternalJump {
-        instruction_index: u32,
         address: u64,
     },
 }
@@ -103,9 +97,7 @@ impl FunctionCodeFlow {
 
                     blocks.push(CodeBlock {
                         instruction_slice: block_start..i + 1,
-                        terminator: Some(CodeBlockTerminator::Return {
-                            instruction_index: i,
-                        }),
+                        terminator: Some(CodeBlockTerminator::Return),
                         fallthrough_to: None,
                     });
                 }
@@ -116,24 +108,18 @@ impl FunctionCodeFlow {
 
                     blocks.push(CodeBlock {
                         instruction_slice: block_start..i + 1,
-                        terminator: Some(CodeBlockTerminator::IndirectJump {
-                            instruction_index: i,
-                        }),
+                        terminator: Some(CodeBlockTerminator::IndirectJump),
                         fallthrough_to: None,
                     });
                 }
                 SemanticInstruction::DirectJump { address } => {
                     let term = if fn_address <= address && address < function_end {
                         CodeBlockTerminator::InternalJump {
-                            instruction_index: i,
                             block_index: BlockIndex::INVALID,
                             address,
                         }
                     } else {
-                        CodeBlockTerminator::ExternalJump {
-                            instruction_index: i,
-                            address,
-                        }
+                        CodeBlockTerminator::ExternalJump { address }
                     };
 
                     let block_index = blocks.len() as u32;
@@ -148,15 +134,11 @@ impl FunctionCodeFlow {
                 SemanticInstruction::ConditionalJump { address, ty: _ } => {
                     let term = if fn_address <= address && address < function_end {
                         CodeBlockTerminator::InternalJump {
-                            instruction_index: i,
                             block_index: BlockIndex::INVALID,
                             address,
                         }
                     } else {
-                        CodeBlockTerminator::ExternalJump {
-                            instruction_index: i,
-                            address,
-                        }
+                        CodeBlockTerminator::ExternalJump { address }
                     };
 
                     let block_index = blocks.len() as u32;

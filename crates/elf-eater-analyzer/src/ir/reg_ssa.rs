@@ -1,4 +1,4 @@
-use crate::asm::passes::code_flow::BlockIndex;
+use crate::asm::passes::code_flow::BlockId;
 use smallvec::SmallVec;
 use std::{
     ops::Range,
@@ -35,7 +35,7 @@ pub struct Value {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Dependency {
     pub value: ValueId,
-    pub source: BlockIndex,
+    pub source: BlockId,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]

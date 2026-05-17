@@ -1,6 +1,6 @@
 use elf_eater_analyzer::{
     asm::passes::{
-        code_flow::{BlockIndex, CodeBlockTerminator, FunctionCodeFlow},
+        code_flow::{BlockId, CodeBlockTerminator, FunctionCodeFlow},
         references::{FunctionLuts, ReferencingInstruction},
         semantic::{ArithmeticInstruction, ArithmeticOpKind, SemanticInstruction},
     },
@@ -114,10 +114,10 @@ fn main() {
     }
 
     // let name = "kgumini";
-    // let name = "qctdccso";
+    let name = "qctdccso";
     // let name = "Java_oracle_streams_XStreamIn_XStreamInAttachNative"; // has div
     // let name = "kghfnd"; // has imul
-    let name = "dbgtbUpdateBucketUtil"; // has idiv
+    // let name = "dbgtbUpdateBucketUtil"; // has idiv
     let sym_va = function_luts.name_map[name];
     let info = &function_luts.infos[&sym_va];
 
@@ -138,22 +138,21 @@ fn main() {
             println!("        {buf}");
         }
 
-        match (block.terminator, block.fallthrough_to) {
-            (None, Some(BlockIndex(index)))
-            | (
-                Some(CodeBlockTerminator::InternalJump {
-                    block_index: BlockIndex(index),
-                    ..
-                }),
-                None,
-            ) => println!("        ; goto block_{index}"),
-            (
-                Some(CodeBlockTerminator::InternalJump {
-                    block_index: BlockIndex(true_index),
-                    ..
-                }),
-                Some(BlockIndex(false_index)),
-            ) => println!("        ; branch block_{true_index}, block_{false_index}"),
+        match block.terminator {
+            CodeBlockTerminator::InternalJump {
+                target: BlockId(target),
+                address: _,
+            }
+            | CodeBlockTerminator::Fallthrough {
+                target: BlockId(target),
+            } => {
+                println!("        ; goto block_{target}")
+            }
+            CodeBlockTerminator::InternalBranch {
+                jump_to: BlockId(jump_to),
+                fallthrough: BlockId(fallthrough),
+                address: _,
+            } => println!("        ; branch block_{jump_to}, block_{fallthrough}"),
             _ => {}
         }
 

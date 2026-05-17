@@ -63,7 +63,7 @@ pub enum SemanticInstruction {
     },
     /// `movsx reg_any, reg_any`
     AssignmentSignExtend {
-        destination: GpRegister,
+        destination: ExtendedGpRegister,
         source: GpRegister,
     },
     /// `lea reg64, [expr]`
@@ -273,6 +273,7 @@ impl From<Instruction> for SemanticInstruction {
             .or_else(|| lift_mov(instr))
             .or_else(|| lift_movzx(instr))
             .or_else(|| lift_movsx(instr))
+            .or_else(|| lift_cbw_cwde_cdqe_cwd_cdq_cqo(instr))
             .or_else(|| lift_lea(instr))
             .or_else(|| lift_xchg(instr))
             .or_else(|| lift_push(instr))
@@ -697,6 +698,36 @@ impl Display for RegOrConst64 {
         match self {
             RegOrConst64::Reg(reg) => reg.fmt(f),
             RegOrConst64::Const(c) => c.fmt(f),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExtendedGpRegister {
+    pub hi: Option<GpRegister>,
+    pub lo: GpRegister,
+}
+
+impl ExtendedGpRegister {
+    pub const fn new(hi: GpRegister, lo: GpRegister) -> Self {
+        Self { hi: Some(hi), lo }
+    }
+}
+
+impl Display for ExtendedGpRegister {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.hi {
+            Some(hi) => write!(f, "({hi}, {})", self.lo),
+            None => self.lo.fmt(f),
+        }
+    }
+}
+
+impl From<GpRegister> for ExtendedGpRegister {
+    fn from(value: GpRegister) -> Self {
+        Self {
+            hi: None,
+            lo: value,
         }
     }
 }
@@ -1503,13 +1534,43 @@ fn lift_movsx(instr: Instruction) -> Option<SemanticInstruction> {
 
     Some(match instr.op1_kind() {
         OpKind::Register => SemanticInstruction::AssignmentSignExtend {
-            destination,
+            destination: destination.into(),
             source: GpRegister::try_from(instr.op1_register()).ok()?,
         },
         OpKind::Memory => SemanticInstruction::LoadSignExtend {
             destination,
             source: lift_memory(&instr)?,
             source_size: PointerSize::try_from(instr.memory_size()).ok()?,
+        },
+        _ => return None,
+    })
+}
+
+fn lift_cbw_cwde_cdqe_cwd_cdq_cqo(instr: Instruction) -> Option<SemanticInstruction> {
+    Some(match instr.mnemonic() {
+        Mnemonic::Cbw => SemanticInstruction::AssignmentSignExtend {
+            destination: GpRegister::AX.into(),
+            source: GpRegister::AL,
+        },
+        Mnemonic::Cwde => SemanticInstruction::AssignmentSignExtend {
+            destination: GpRegister::EAX.into(),
+            source: GpRegister::AX,
+        },
+        Mnemonic::Cdqe => SemanticInstruction::AssignmentSignExtend {
+            destination: GpRegister::RAX.into(),
+            source: GpRegister::EAX,
+        },
+        Mnemonic::Cwd => SemanticInstruction::AssignmentSignExtend {
+            destination: ExtendedGpRegister::new(GpRegister::DX, GpRegister::AX),
+            source: GpRegister::AX,
+        },
+        Mnemonic::Cdq => SemanticInstruction::AssignmentSignExtend {
+            destination: ExtendedGpRegister::new(GpRegister::EDX, GpRegister::EAX),
+            source: GpRegister::EAX,
+        },
+        Mnemonic::Cqo => SemanticInstruction::AssignmentSignExtend {
+            destination: ExtendedGpRegister::new(GpRegister::RDX, GpRegister::RAX),
+            source: GpRegister::RAX,
         },
         _ => return None,
     })

@@ -1,3 +1,5 @@
+use petgraph::graph::{DiGraph, NodeIndex};
+
 use crate::asm::passes::{
     references::{FunctionInfo, FunctionLuts},
     semantic::SemanticInstruction,
@@ -202,5 +204,52 @@ impl FunctionCodeFlow {
     pub fn address_to_index(&self, info: &FunctionInfo, address: u64) -> Option<BlockId> {
         let instruction_index = *info.address_map.get(&address)? as u32;
         self.index_to_block.get(&instruction_index).copied()
+    }
+
+    pub fn build_cfg(&self) -> DiGraph<BlockId, bool> {
+        let mut result = DiGraph::new();
+
+        for i in 0..self.blocks.len() as u32 {
+            result.add_node(BlockId(i));
+        }
+
+        for (i, block) in self.blocks.iter().enumerate() {
+            let from = NodeIndex::new(i);
+
+            match block.terminator {
+                CodeBlockTerminator::InternalJump {
+                    target: BlockId(jump_to),
+                    ..
+                }
+                | CodeBlockTerminator::ExternalBranch {
+                    fallthrough: BlockId(jump_to),
+                    ..
+                }
+                | CodeBlockTerminator::Fallthrough {
+                    target: BlockId(jump_to),
+                } => {
+                    let to = NodeIndex::new(jump_to as usize);
+                    result.add_edge(from, to, false);
+                }
+
+                CodeBlockTerminator::InternalBranch {
+                    jump_to: BlockId(on_true),
+                    fallthrough: BlockId(on_false),
+                    ..
+                } => {
+                    let to_true = NodeIndex::new(on_true as usize);
+                    let to_false = NodeIndex::new(on_false as usize);
+
+                    result.add_edge(from, to_true, true);
+                    result.add_edge(from, to_false, false);
+                }
+
+                CodeBlockTerminator::ExternalJump { .. }
+                | CodeBlockTerminator::IndirectJump
+                | CodeBlockTerminator::Return => {}
+            }
+        }
+
+        result
     }
 }

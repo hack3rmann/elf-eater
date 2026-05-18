@@ -7,6 +7,7 @@ use elf_eater_analyzer::{
     context::DisassemblerContext,
 };
 use iced_x86::{Mnemonic, NasmFormatter};
+use petgraph::{algo::dominators, graph::NodeIndex};
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 #[allow(unused)]
@@ -38,51 +39,27 @@ fn walk_references(
     };
 
     for instruction in instructions.clone() {
-        match instruction {
-            ReferencingInstruction::FunctionCall { virtual_address } => {
-                if visited.contains(&virtual_address) {
-                    continue;
-                }
-
-                func(ctx, luts, depth, function_virtual_address, virtual_address);
-
-                walk_references(
-                    ctx,
-                    luts,
-                    instruction_map,
-                    visited,
-                    virtual_address,
-                    depth + 1,
-                    func,
-                );
+        if let ReferencingInstruction::FunctionCall { virtual_address }
+        | ReferencingInstruction::PltFunctionCall {
+            actual_virtual_address: virtual_address,
+            plt_virtual_address: _,
+        } = instruction
+        {
+            if visited.contains(&virtual_address) {
+                continue;
             }
-            ReferencingInstruction::PltFunctionCall {
-                actual_virtual_address,
-                plt_virtual_address: _,
-            } => {
-                if visited.contains(&actual_virtual_address) {
-                    continue;
-                }
 
-                func(
-                    ctx,
-                    luts,
-                    depth,
-                    function_virtual_address,
-                    actual_virtual_address,
-                );
+            func(ctx, luts, depth, function_virtual_address, virtual_address);
 
-                walk_references(
-                    ctx,
-                    luts,
-                    instruction_map,
-                    visited,
-                    actual_virtual_address,
-                    depth + 1,
-                    func,
-                );
-            }
-            _ => {}
+            walk_references(
+                ctx,
+                luts,
+                instruction_map,
+                visited,
+                virtual_address,
+                depth + 1,
+                func,
+            );
         }
     }
 }
@@ -160,4 +137,9 @@ fn main() {
     }
 
     println!("}}");
+
+    let cfg = code_flow.build_cfg();
+    let dominators = dominators::simple_fast(&cfg, NodeIndex::new(0));
+
+    dbg!(dominators);
 }

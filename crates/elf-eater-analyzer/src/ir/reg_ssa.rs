@@ -3,7 +3,10 @@ use crate::{
     asm::passes::{
         code_flow::{BlockId, FunctionCodeFlow, InstructionSpan},
         references::FunctionInfo,
-        semantic::{Register64, SemanticInstruction},
+        semantic::{
+            ArithmeticInstruction, ArithmeticOperands, ExtendedGpRegister, GpRegister, RegOrMemory,
+            Register64, SemanticInstruction, SizedRegOrMemory,
+        },
     },
 };
 use petgraph::{algo::dominators, graph::NodeIndex};
@@ -85,15 +88,15 @@ impl Ssa {
         for (block_id, block) in flow.blocks() {
             let instructions = &info.instructions[block.span.range()];
 
-            for instruction in instructions {
-                if let &SemanticInstruction::Assignment { destination, .. } = instruction {
+            for &instruction in instructions {
+                visit_assignment(instruction, &mut |destination| {
                     def_sources[destination as usize].push(block_id);
 
                     block_assignments
                         .entry(block_id)
                         .or_default()
                         .insert(destination);
-                }
+                });
             }
         }
 
@@ -119,5 +122,117 @@ impl Ssa {
         dbg!(&block_assignments);
 
         todo!()
+    }
+}
+
+fn visit_assignment(instruction: SemanticInstruction, visit: &mut impl FnMut(Register64)) {
+    match instruction {
+        SemanticInstruction::LoadAddress {
+            destination: GpRegister {
+                full: destination, ..
+            },
+            ..
+        }
+        | SemanticInstruction::Pop {
+            operand: RegOrMemory::Reg(destination),
+            ..
+        }
+        | SemanticInstruction::LoadZeroExtend {
+            destination: GpRegister {
+                full: destination, ..
+            },
+            ..
+        }
+        | SemanticInstruction::LoadSignExtend {
+            destination: GpRegister {
+                full: destination, ..
+            },
+            ..
+        }
+        | SemanticInstruction::Exchange {
+            first: RegOrMemory::Reg(destination),
+            second: RegOrMemory::Mem(_),
+            ..
+        }
+        | SemanticInstruction::Exchange {
+            first: RegOrMemory::Mem(_),
+            second: RegOrMemory::Reg(destination),
+            ..
+        }
+        | SemanticInstruction::Load {
+            destination: GpRegister {
+                full: destination, ..
+            },
+            ..
+        }
+        | SemanticInstruction::Assignment { destination, .. }
+        | SemanticInstruction::AssignmentSignExtend {
+            destination:
+                ExtendedGpRegister {
+                    hi: None,
+                    lo:
+                        GpRegister {
+                            full: destination, ..
+                        },
+                },
+            ..
+        }
+        | SemanticInstruction::Arithmetic(ArithmeticInstruction {
+            operands:
+                ArithmeticOperands::ShortExpression {
+                    result:
+                        SizedRegOrMemory::Reg(GpRegister {
+                            full: destination, ..
+                        }),
+                    ..
+                }
+                | ArithmeticOperands::TernaryExpression {
+                    result:
+                        SizedRegOrMemory::Reg(GpRegister {
+                            full: destination, ..
+                        }),
+                    ..
+                },
+            ..
+        })
+        | SemanticInstruction::AssignmentZeroExtend {
+            destination: GpRegister {
+                full: destination, ..
+            },
+            ..
+        } => {
+            visit(destination);
+        }
+        SemanticInstruction::Exchange {
+            first: RegOrMemory::Reg(first),
+            second: RegOrMemory::Reg(second),
+            ..
+        }
+        | SemanticInstruction::Arithmetic(ArithmeticInstruction {
+            operands:
+                ArithmeticOperands::ResultExtendedExpression {
+                    result_hi: SizedRegOrMemory::Reg(GpRegister { full: first, .. }),
+                    result_lo: SizedRegOrMemory::Reg(GpRegister { full: second, .. }),
+                    ..
+                }
+                | ArithmeticOperands::OperandExtendedExpression {
+                    result_first: SizedRegOrMemory::Reg(GpRegister { full: first, .. }),
+                    result_second: SizedRegOrMemory::Reg(GpRegister { full: second, .. }),
+                    ..
+                },
+            ..
+        })
+        | SemanticInstruction::AssignmentSignExtend {
+            destination:
+                ExtendedGpRegister {
+                    hi: Some(GpRegister { full: first, .. }),
+                    lo: GpRegister { full: second, .. },
+                },
+            ..
+        } => {
+            visit(first);
+            visit(second);
+        }
+        _ => (),
     }
 }

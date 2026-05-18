@@ -99,8 +99,8 @@ fn main() {
 
     // let name = "kgumini";
     // let name = "qctdccso";
-    let name = "kguudltr";
-    // let name = "Java_oracle_streams_XStreamIn_XStreamInAttachNative"; // has div
+    // let name = "kguudltr";
+    let name = "Java_oracle_streams_XStreamIn_XStreamInAttachNative"; // has div
     // let name = "kghfnd"; // has imul
     // let name = "dbgtbUpdateBucketUtil"; // has idiv
     let sym_va = function_luts.name_map[name];

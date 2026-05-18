@@ -5,7 +5,7 @@ use crate::{
         references::FunctionInfo,
         semantic::{
             ArithmeticInstruction, ArithmeticOperands, ExtendedGpRegister, GpRegister, RegOrMemory,
-            Register64, SemanticInstruction, SizedRegOrMemory,
+            Register64, Registers64, SemanticInstruction, SizedRegOrMemory,
         },
     },
 };
@@ -13,7 +13,7 @@ use petgraph::{algo::dominators, graph::NodeIndex};
 use smallvec::SmallVec;
 use std::{
     array,
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, btree_map::Entry},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -83,7 +83,7 @@ impl Ssa {
         let mut def_sources: [_; Register64::COUNT] =
             array::from_fn(|_| SmallVec::<[BlockId; 6]>::new_const());
 
-        let mut block_assignments = BTreeMap::<BlockId, HashSet<Register64>>::new();
+        let mut block_assignments = BTreeMap::<BlockId, Registers64>::new();
 
         for (block_id, block) in flow.blocks() {
             let instructions = &info.instructions[block.span.range()];
@@ -95,12 +95,12 @@ impl Ssa {
                     block_assignments
                         .entry(block_id)
                         .or_default()
-                        .insert(destination);
+                        .insert(destination.into());
                 });
             }
         }
 
-        let mut phi_needed = BTreeSet::new();
+        let mut phi_needed = BTreeMap::<BlockId, Registers64>::new();
         let mut extended_def = Vec::new();
 
         for reg in Register64::ALL {
@@ -111,8 +111,19 @@ impl Ssa {
                 for join in &dom_frontier[def_block.0 as usize] {
                     let block_id = BlockId(join.index() as u32);
 
-                    if phi_needed.insert((block_id, reg)) {
-                        extended_def.push(block_id);
+                    match phi_needed.entry(block_id) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(reg.into());
+                            extended_def.push(block_id);
+                        }
+                        Entry::Occupied(entry) => {
+                            let bits = entry.into_mut();
+
+                            if !bits.contains(reg.into()) {
+                                bits.insert(reg.into());
+                                extended_def.push(block_id);
+                            }
+                        }
                     }
                 }
             }

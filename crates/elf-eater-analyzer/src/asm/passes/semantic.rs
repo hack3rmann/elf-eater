@@ -862,6 +862,51 @@ impl Display for GpRegister {
     }
 }
 
+bitflags! {
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct Registers64: u16 {
+        const RAX = 1 << 0;
+        const RBX = 1 << 1;
+        const RCX = 1 << 2;
+        const RDX = 1 << 3;
+        const RSI = 1 << 4;
+        const RDI = 1 << 5;
+        const RBP = 1 << 6;
+        const RSP = 1 << 7;
+        const R8 = 1 << 8;
+        const R9 = 1 << 9;
+        const R10 = 1 << 10;
+        const R11 = 1 << 11;
+        const R12 = 1 << 12;
+        const R13 = 1 << 13;
+        const R14 = 1 << 14;
+        const R15 = 1 << 15;
+    }
+}
+
+impl From<Register64> for Registers64 {
+    fn from(value: Register64) -> Self {
+        match value {
+            Register64::Rax => Self::RAX,
+            Register64::Rbx => Self::RBX,
+            Register64::Rcx => Self::RCX,
+            Register64::Rdx => Self::RDX,
+            Register64::Rsi => Self::RSI,
+            Register64::Rdi => Self::RDI,
+            Register64::Rbp => Self::RBP,
+            Register64::Rsp => Self::RSP,
+            Register64::R8 => Self::R8,
+            Register64::R9 => Self::R9,
+            Register64::R10 => Self::R10,
+            Register64::R11 => Self::R11,
+            Register64::R12 => Self::R12,
+            Register64::R13 => Self::R13,
+            Register64::R14 => Self::R14,
+            Register64::R15 => Self::R15,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Register64 {
     #[default]

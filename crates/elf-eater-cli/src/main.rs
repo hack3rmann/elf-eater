@@ -5,6 +5,7 @@ use elf_eater_analyzer::{
         semantic::{ArithmeticInstruction, ArithmeticOpKind, SemanticInstruction},
     },
     context::DisassemblerContext,
+    ir::reg_ssa::Ssa,
 };
 use iced_x86::{Mnemonic, NasmFormatter};
 use petgraph::{algo::dominators, graph::NodeIndex};
@@ -97,7 +98,8 @@ fn main() {
     let function_luts = FunctionLuts::new(&ctx);
 
     // let name = "kgumini";
-    let name = "qctdccso";
+    // let name = "qctdccso";
+    let name = "kguudltr";
     // let name = "Java_oracle_streams_XStreamIn_XStreamInAttachNative"; // has div
     // let name = "kghfnd"; // has imul
     // let name = "dbgtbUpdateBucketUtil"; // has idiv
@@ -146,6 +148,8 @@ fn main() {
 
     let cfg = code_flow.build_cfg();
     let dominators = dominators::simple_fast(&cfg, NodeIndex::new(0));
+
+    let _ssa = Ssa::build(&code_flow, info);
 
     dbg!(dominators);
 }

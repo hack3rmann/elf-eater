@@ -53,7 +53,7 @@ pub enum CodeBlockTerminator {
     IndirectJump,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct CodeBlock {
     pub span: InstructionSpan,
     pub terminator: CodeBlockTerminator,
@@ -260,5 +260,12 @@ impl FunctionCodeFlow {
         }
 
         result
+    }
+
+    pub fn blocks(&self) -> impl ExactSizeIterator<Item = (BlockId, CodeBlock)> + '_ {
+        self.blocks
+            .iter()
+            .enumerate()
+            .map(|(i, block)| (BlockId(i as u32), *block))
     }
 }

@@ -6,7 +6,7 @@ use std::{
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct InstructionIndex(pub u32);
+pub struct InstructionId(pub u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SemanticInstruction {
@@ -865,25 +865,45 @@ impl Display for GpRegister {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Register64 {
     #[default]
-    Rax,
-    Rbx,
-    Rcx,
-    Rdx,
-    Rsi,
-    Rdi,
-    Rbp,
-    Rsp,
-    R8,
-    R9,
-    R10,
-    R11,
-    R12,
-    R13,
-    R14,
-    R15,
+    Rax = 0,
+    Rbx = 1,
+    Rcx = 2,
+    Rdx = 3,
+    Rsi = 4,
+    Rdi = 5,
+    Rbp = 6,
+    Rsp = 7,
+    R8 = 8,
+    R9 = 9,
+    R10 = 10,
+    R11 = 11,
+    R12 = 12,
+    R13 = 13,
+    R14 = 14,
+    R15 = 15,
 }
 
 impl Register64 {
+    pub const COUNT: usize = Self::R15 as usize + 1;
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::Rax,
+        Self::Rbx,
+        Self::Rcx,
+        Self::Rdx,
+        Self::Rsi,
+        Self::Rdi,
+        Self::Rbp,
+        Self::Rsp,
+        Self::R8,
+        Self::R9,
+        Self::R10,
+        Self::R11,
+        Self::R12,
+        Self::R13,
+        Self::R14,
+        Self::R15,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         GpRegister::new(self, RegisterSliceKind::R64).as_str()
     }

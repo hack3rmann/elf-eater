@@ -8,13 +8,16 @@ use elf_eater_analyzer::{
 };
 use iced_x86::{Mnemonic, NasmFormatter};
 use petgraph::{algo::dominators, graph::NodeIndex};
-use std::collections::{HashMap, HashSet, hash_map::Entry};
+use std::{
+    collections::{HashMap, HashSet, hash_map::Entry},
+    sync::Arc,
+};
 
 #[allow(unused)]
 fn walk_references(
     ctx: &DisassemblerContext,
     luts: &FunctionLuts,
-    instruction_map: &mut HashMap<u64, Vec<ReferencingInstruction>>,
+    instruction_map: &mut HashMap<u64, Arc<[ReferencingInstruction]>>,
     visited: &mut HashSet<u64>,
     function_virtual_address: u64,
     depth: usize,
@@ -26,7 +29,7 @@ fn walk_references(
 
     visited.insert(function_virtual_address);
 
-    let instructions = match instruction_map.entry(function_virtual_address) {
+    let instructions = Arc::clone(match instruction_map.entry(function_virtual_address) {
         Entry::Occupied(entry) => entry.into_mut(),
         Entry::Vacant(entry) => {
             let Some(instructions) = luts.resolve_references(ctx.elf(), function_virtual_address)
@@ -34,13 +37,13 @@ fn walk_references(
                 return;
             };
 
-            entry.insert(instructions)
+            entry.insert(instructions.into())
         }
-    };
+    });
 
-    for instruction in instructions.clone() {
-        if let ReferencingInstruction::FunctionCall { virtual_address }
-        | ReferencingInstruction::PltFunctionCall {
+    for instruction in instructions.iter() {
+        if let &ReferencingInstruction::FunctionCall { virtual_address }
+        | &ReferencingInstruction::PltFunctionCall {
             actual_virtual_address: virtual_address,
             plt_virtual_address: _,
         } = instruction
@@ -64,12 +67,9 @@ fn walk_references(
     }
 }
 
-fn main() {
-    let ctx = DisassemblerContext::read("/home/hack3rmann/Downloads/libclntsh.so.12.1.0");
-    let function_luts = FunctionLuts::new(&ctx);
-
-    for (name, &address) in &function_luts.name_map {
-        let Some(info) = function_luts.infos.get(&address) else {
+fn _find_instruction(luts: &FunctionLuts) -> Option<&str> {
+    for (name, &address) in &luts.name_map {
+        let Some(info) = luts.infos.get(&address) else {
             continue;
         };
 
@@ -85,10 +85,16 @@ fn main() {
         });
 
         if div.is_some() {
-            eprintln!("found div in '{name}'");
-            break;
+            return Some(name);
         }
     }
+
+    None
+}
+
+fn main() {
+    let ctx = DisassemblerContext::read("/home/hack3rmann/Downloads/libclntsh.so.12.1.0");
+    let function_luts = FunctionLuts::new(&ctx);
 
     // let name = "kgumini";
     let name = "qctdccso";
@@ -108,7 +114,7 @@ fn main() {
     for (i, block) in code_flow.blocks.iter().enumerate() {
         println!("    block_{i} {{");
 
-        for instruction in &info.instructions[block.range()] {
+        for instruction in &info.instructions[block.span.range()] {
             buf.clear();
             instruction.format(&mut formatter, &mut buf);
 

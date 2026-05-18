@@ -1,28 +1,6 @@
-use crate::asm::passes::code_flow::BlockId;
+use crate::asm::passes::code_flow::{BlockId, InstructionSpan};
 use smallvec::SmallVec;
-use std::{
-    ops::Range,
-    sync::atomic::{AtomicU64, Ordering::Relaxed},
-};
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct InstructionSpan {
-    start: u32,
-    end: u32,
-}
-
-impl InstructionSpan {
-    pub const fn new(start: u32, end: u32) -> Self {
-        Self { start, end }
-    }
-
-    pub fn as_range(self) -> Range<usize> {
-        Range {
-            start: self.start as usize,
-            end: self.end as usize,
-        }
-    }
-}
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ValueId(pub u64);

@@ -1,13 +1,31 @@
-use petgraph::graph::{DiGraph, NodeIndex};
-
 use crate::asm::passes::{
     references::{FunctionInfo, FunctionLuts},
     semantic::SemanticInstruction,
 };
+use petgraph::graph::{DiGraph, NodeIndex};
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
 };
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InstructionSpan {
+    start: u32,
+    end: u32,
+}
+
+impl InstructionSpan {
+    pub const fn new(start: u32, end: u32) -> Self {
+        Self { start, end }
+    }
+
+    pub const fn range(self) -> Range<usize> {
+        Range {
+            start: self.start as usize,
+            end: self.end as usize,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CodeBlockTerminator {
@@ -37,17 +55,8 @@ pub enum CodeBlockTerminator {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct CodeBlock {
-    pub instruction_slice: Range<u32>,
+    pub span: InstructionSpan,
     pub terminator: CodeBlockTerminator,
-}
-
-impl CodeBlock {
-    pub fn range(&self) -> Range<usize> {
-        Range {
-            start: self.instruction_slice.start as usize,
-            end: self.instruction_slice.end as usize,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -95,7 +104,7 @@ impl FunctionCodeFlow {
                     index_to_block.insert(block_start, BlockId(block_index));
 
                     blocks.push(CodeBlock {
-                        instruction_slice: block_start..i,
+                        span: InstructionSpan::new(block_start, i),
                         terminator: CodeBlockTerminator::Fallthrough { target: BlockId(i) },
                     });
                 }
@@ -109,7 +118,7 @@ impl FunctionCodeFlow {
                     index_to_block.insert(block_start, BlockId(block_index));
 
                     blocks.push(CodeBlock {
-                        instruction_slice: block_start..i + 1,
+                        span: InstructionSpan::new(block_start, i + 1),
                         terminator: CodeBlockTerminator::Return,
                     });
                 }
@@ -119,7 +128,7 @@ impl FunctionCodeFlow {
                     index_to_block.insert(block_start, BlockId(block_index));
 
                     blocks.push(CodeBlock {
-                        instruction_slice: block_start..i + 1,
+                        span: InstructionSpan::new(block_start, i + 1),
                         terminator: CodeBlockTerminator::IndirectJump,
                     });
                 }
@@ -137,7 +146,7 @@ impl FunctionCodeFlow {
                     index_to_block.insert(block_start, BlockId(block_index));
 
                     blocks.push(CodeBlock {
-                        instruction_slice: block_start..i + 1,
+                        span: InstructionSpan::new(block_start, i + 1),
                         terminator,
                     });
                 }
@@ -161,7 +170,7 @@ impl FunctionCodeFlow {
                     index_to_block.insert(block_start, BlockId(block_index));
 
                     blocks.push(CodeBlock {
-                        instruction_slice: block_start..i + 1,
+                        span: InstructionSpan::new(block_start, i + 1),
                         terminator,
                     });
                 }

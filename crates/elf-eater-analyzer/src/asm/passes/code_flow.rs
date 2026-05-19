@@ -64,6 +64,10 @@ pub struct BlockId(pub u32);
 
 impl BlockId {
     const INVALID: Self = Self(u32::MAX);
+
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

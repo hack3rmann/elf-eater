@@ -15,6 +15,8 @@ pub struct InstructionSpan {
 }
 
 impl InstructionSpan {
+    pub const EMPTY: Self = Self { start: 0, end: 0 };
+
     pub const fn new(start: u32, end: u32) -> Self {
         Self { start, end }
     }

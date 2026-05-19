@@ -10,19 +10,33 @@ use crate::{
     },
 };
 use petgraph::{algo::dominators, graph::NodeIndex};
-use smallvec::SmallVec;
+use smallvec::{SmallVec, smallvec};
 use std::array;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ValueId(pub u32);
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ValueType {
-    #[default]
-    Register,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DefinitionTarget {
+    Register(Register64),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ValueId(pub u32);
+
+impl ValueId {
+    pub const INVALID: Self = Self(u32::MAX);
+}
+
+impl Default for ValueId {
+    fn default() -> Self {
+        Self::INVALID
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ValueType {
+    Register(Register64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Value {
     pub id: ValueId,
     pub ty: ValueType,
@@ -38,6 +52,7 @@ pub struct Dependency {
 pub enum DefinitionValue {
     #[default]
     Undefined,
+    External,
     Const(u64),
     Value(ValueId),
     Add {
@@ -49,15 +64,22 @@ pub enum DefinitionValue {
     },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Definition {
     pub id: ValueId,
+    pub target: DefinitionTarget,
     pub value: DefinitionValue,
     pub span: InstructionSpan,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DefinitionId(pub u32);
+
+impl DefinitionId {
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SsaBlock {
@@ -113,10 +135,185 @@ impl Ssa {
             }
         }
 
-        dbg!(&phi_needed);
-        dbg!(&block_assignments);
+        let mut values = Vec::<Value>::new();
+        let mut blocks = vec![SsaBlock::default(); flow.blocks.len()];
+        let mut definitions = Vec::<Definition>::new();
+
+        let mut next_value = make_counter(ValueId);
+        let mut next_def = make_counter(DefinitionId);
+
+        for (block_index, &regs) in phi_needed.iter().enumerate() {
+            for reg in regs {
+                let Some(reg) = reg.single() else {
+                    unreachable!();
+                };
+
+                let value = next_value();
+                values.push(Value {
+                    id: value,
+                    ty: ValueType::Register(reg),
+                });
+
+                let def_id = next_def();
+                definitions.push(Definition {
+                    id: value,
+                    value: DefinitionValue::Phi {
+                        dependencies: smallvec![],
+                    },
+                    span: InstructionSpan::EMPTY,
+                    target: DefinitionTarget::Register(reg),
+                });
+
+                blocks[block_index].definitions.push(def_id);
+            }
+        }
+
+        let mut idom_inverse: Vec<SmallVec<[u32; 12]>> = vec![smallvec![]; flow.blocks.len()];
+
+        for index in (0..flow.blocks.len()).map(NodeIndex::new) {
+            let Some(dom_id) = dom_tree.immediate_dominator(index) else {
+                continue;
+            };
+
+            idom_inverse[dom_id.index()].push(index.index() as u32);
+        }
+
+        for reg in Register64::ALL {
+            let root_value_id = next_value();
+            values.push(Value {
+                id: root_value_id,
+                ty: ValueType::Register(reg),
+            });
+
+            let _def_id = next_def();
+            definitions.push(Definition {
+                id: root_value_id,
+                target: DefinitionTarget::Register(reg),
+                value: DefinitionValue::External,
+                span: InstructionSpan::EMPTY,
+            });
+
+            let mut def_stack = vec![root_value_id];
+
+            let mut enter = |def_stack: &mut Vec<ValueId>, node_id| {
+                let mut cur_definitions = blocks[node_id as usize]
+                    .definitions
+                    .iter()
+                    .map(|&id| &definitions[id.index()]);
+
+                let parent_def = def_stack.last().copied().expect("def_stack is never empty");
+                let mut last_def = parent_def;
+
+                // The node contains Phi for the selected register
+                if let Some(def) = cur_definitions
+                    .find(|&def| matches!(def.target, DefinitionTarget::Register(phi_reg) if phi_reg == reg))
+                {
+                    last_def = def.id;
+                }
+
+                let block = &flow.blocks[node_id as usize];
+                let block_instructions = &info.instructions[block.span.range()];
+                let block_start = block.span.range().start as u32;
+
+                for (&instruction, i) in block_instructions.iter().zip(block_start..) {
+                    let span = InstructionSpan::new(i, i + 1);
+
+                    visit_assignment(instruction, &mut |target| {
+                        if target != reg {
+                            return;
+                        }
+
+                        // FIXME: Missing the actual LHS register type
+                        let value = next_value();
+                        values.push(Value {
+                            id: value,
+                            ty: ValueType::Register(reg),
+                        });
+
+                        last_def = value;
+
+                        // FIXME: Missing the actual RHS
+                        let def_id = next_def();
+                        definitions.push(Definition {
+                            id: value,
+                            value: DefinitionValue::Const(42),
+                            span,
+                            target: DefinitionTarget::Register(reg),
+                        });
+
+                        blocks[node_id as usize].definitions.push(def_id);
+                    });
+                }
+
+                def_stack.push(last_def);
+            };
+
+            let mut leave = |def_stack: &mut Vec<ValueId>, _| {
+                def_stack.pop();
+            };
+
+            iterative_dfs(&idom_inverse, 0, &mut def_stack, &mut enter, &mut leave);
+        }
+
+        for (i, block) in blocks.iter().enumerate() {
+            eprintln!("block_{i}:");
+
+            for &def_id in &block.definitions {
+                let def = &definitions[def_id.index()];
+
+                let DefinitionTarget::Register(_) = def.target;
+                eprint!("    x{} = ", def.id.0);
+
+                match def.value {
+                    DefinitionValue::External => eprintln!("external"),
+                    DefinitionValue::Undefined => eprintln!("undefined"),
+                    DefinitionValue::Const(c) => eprintln!("{c}"),
+                    DefinitionValue::Value(_) | DefinitionValue::Add { .. } => eprintln!("..."),
+                    DefinitionValue::Phi { .. } => eprintln!("phi(...)"),
+                }
+            }
+        }
+
+        // dbg!(&values);
+        // dbg!(&blocks);
+        // dbg!(&definitions);
 
         todo!()
+    }
+}
+
+fn iterative_dfs<S>(
+    graph: &[SmallVec<[u32; 12]>],
+    root: u32,
+    state: &mut S,
+    enter: &mut impl FnMut(&mut S, u32),
+    leave: &mut impl FnMut(&mut S, u32),
+) {
+    let mut stack = vec![(root, 0)];
+
+    while let Some((node, i)) = stack.pop() {
+        if i == 0 {
+            enter(state, node);
+        }
+
+        if i >= graph[node as usize].len() {
+            leave(state, node);
+            continue;
+        }
+
+        let child = graph[node as usize][i];
+
+        stack.push((node, i + 1));
+        stack.push((child, 0));
+    }
+}
+
+#[inline(always)]
+fn make_counter<T>(id: impl Fn(u32) -> T) -> impl FnMut() -> T {
+    let mut last_id = u32::MAX;
+    move || {
+        last_id = last_id.wrapping_add(1);
+        id(last_id)
     }
 }
 

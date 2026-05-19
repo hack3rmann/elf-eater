@@ -884,6 +884,30 @@ bitflags! {
     }
 }
 
+impl Registers64 {
+    pub const fn single(self) -> Option<Register64> {
+        Some(match self {
+            Self::RAX => Register64::Rax,
+            Self::RBX => Register64::Rbx,
+            Self::RCX => Register64::Rcx,
+            Self::RDX => Register64::Rdx,
+            Self::RSI => Register64::Rsi,
+            Self::RDI => Register64::Rdi,
+            Self::RBP => Register64::Rbp,
+            Self::RSP => Register64::Rsp,
+            Self::R8 => Register64::R8,
+            Self::R9 => Register64::R9,
+            Self::R10 => Register64::R10,
+            Self::R11 => Register64::R11,
+            Self::R12 => Register64::R12,
+            Self::R13 => Register64::R13,
+            Self::R14 => Register64::R14,
+            Self::R15 => Register64::R15,
+            _ => return None,
+        })
+    }
+}
+
 impl From<Register64> for Registers64 {
     fn from(value: Register64) -> Self {
         match value {

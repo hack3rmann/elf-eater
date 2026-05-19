@@ -9,7 +9,10 @@ use crate::{
         },
     },
 };
-use petgraph::{algo::dominators, graph::NodeIndex};
+use petgraph::{
+    algo::dominators::{self, Dominators},
+    graph::{DiGraph, NodeIndex},
+};
 use smallvec::{SmallVec, smallvec};
 use std::array;
 
@@ -86,7 +89,11 @@ pub struct SsaBlock {
     pub definitions: SmallVec<[DefinitionId; 14]>,
 }
 
+#[derive(Clone, Debug)]
 pub struct Ssa {
+    pub cfg: DiGraph<BlockId, bool>,
+    pub dom_tree: Dominators<NodeIndex>,
+    pub dom_frontier: Vec<SmallVec<[NodeIndex; 4]>>,
     pub values: Vec<Value>,
     pub definitions: Vec<Definition>,
     pub blocks: Vec<SsaBlock>,
@@ -100,9 +107,7 @@ impl Ssa {
         let dom_frontier = algo::dominance_frontiers(&cfg, &dom_tree);
 
         let mut def_sources: [_; Register64::COUNT] =
-            array::from_fn(|_| SmallVec::<[BlockId; 6]>::new_const());
-
-        let mut block_assignments = vec![Registers64::empty(); flow.blocks.len()];
+            array::from_fn(|_| SmallVec::<[BlockId; 12]>::new_const());
 
         for (block_id, block) in flow.blocks() {
             let instructions = &info.instructions[block.span.range()];
@@ -110,7 +115,6 @@ impl Ssa {
             for &instruction in instructions {
                 visit_assignment(instruction, &mut |destination| {
                     def_sources[destination as usize].push(block_id);
-                    block_assignments[block_id.index()].insert(destination.into());
                 });
             }
         }
@@ -185,7 +189,7 @@ impl Ssa {
                 ty: ValueType::Register(reg),
             });
 
-            let _def_id = next_def();
+            let def_id = next_def();
             definitions.push(Definition {
                 id: root_value_id,
                 target: DefinitionTarget::Register(reg),
@@ -193,7 +197,12 @@ impl Ssa {
                 span: InstructionSpan::EMPTY,
             });
 
+            if let Some(first) = blocks.first_mut() {
+                first.definitions.push(def_id);
+            }
+
             let mut def_stack = vec![root_value_id];
+            let mut finalized_defs = vec![ValueId::INVALID; flow.blocks.len()];
 
             let mut enter = |def_stack: &mut Vec<ValueId>, node_id| {
                 let mut cur_definitions = blocks[node_id as usize]
@@ -223,7 +232,6 @@ impl Ssa {
                             return;
                         }
 
-                        // FIXME: Missing the actual LHS register type
                         let value = next_value();
                         values.push(Value {
                             id: value,
@@ -246,6 +254,7 @@ impl Ssa {
                 }
 
                 def_stack.push(last_def);
+                finalized_defs[node_id as usize] = last_def;
             };
 
             let mut leave = |def_stack: &mut Vec<ValueId>, _| {
@@ -253,32 +262,51 @@ impl Ssa {
             };
 
             iterative_dfs(&idom_inverse, 0, &mut def_stack, &mut enter, &mut leave);
+
+            iterative_dfs(
+                &idom_inverse,
+                0,
+                &mut (),
+                &mut |_, node_id| {
+                    for &def_id in &blocks[node_id as usize].definitions {
+                        let defs = &mut definitions[def_id.index()];
+
+                        let DefinitionTarget::Register(phi_reg) = defs.target;
+
+                        if phi_reg != reg {
+                            continue;
+                        }
+
+                        let DefinitionValue::Phi { dependencies } = &mut defs.value else {
+                            break;
+                        };
+
+                        for parent in cfg.neighbors_directed(
+                            NodeIndex::new(node_id as usize),
+                            petgraph::Direction::Incoming,
+                        ) {
+                            let parent_value_id = finalized_defs[parent.index()];
+                            assert_ne!(parent_value_id, ValueId::INVALID);
+
+                            dependencies.push(Dependency {
+                                value: parent_value_id,
+                                source: BlockId(parent.index() as u32),
+                            });
+                        }
+                    }
+                },
+                &mut |_, _| {},
+            );
         }
 
-        for (i, block) in blocks.iter().enumerate() {
-            eprintln!("block_{i}:");
-
-            for &def_id in &block.definitions {
-                let def = &definitions[def_id.index()];
-
-                let DefinitionTarget::Register(_) = def.target;
-                eprint!("    x{} = ", def.id.0);
-
-                match def.value {
-                    DefinitionValue::External => eprintln!("external"),
-                    DefinitionValue::Undefined => eprintln!("undefined"),
-                    DefinitionValue::Const(c) => eprintln!("{c}"),
-                    DefinitionValue::Value(_) | DefinitionValue::Add { .. } => eprintln!("..."),
-                    DefinitionValue::Phi { .. } => eprintln!("phi(...)"),
-                }
-            }
+        Self {
+            values,
+            blocks,
+            definitions,
+            cfg,
+            dom_tree,
+            dom_frontier,
         }
-
-        // dbg!(&values);
-        // dbg!(&blocks);
-        // dbg!(&definitions);
-
-        todo!()
     }
 }
 

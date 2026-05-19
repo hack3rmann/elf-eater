@@ -5,10 +5,9 @@ use elf_eater_analyzer::{
         semantic::{ArithmeticInstruction, ArithmeticOpKind, SemanticInstruction},
     },
     context::DisassemblerContext,
-    ir::reg_ssa::Ssa,
+    ir::reg_ssa::{DefinitionTarget, DefinitionValue, Ssa},
 };
 use iced_x86::{Mnemonic, NasmFormatter};
-use petgraph::{algo::dominators, graph::NodeIndex};
 use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
     sync::Arc,
@@ -99,9 +98,9 @@ fn main() {
 
     // let name = "kgumini";
     // let name = "qctdccso";
-    let name = "kguudltr";
+    // let name = "kguudltr";
     // let name = "Java_oracle_streams_XStreamIn_XStreamInAttachNative"; // has div
-    // let name = "kghfnd"; // has imul
+    let name = "kghfnd"; // has imul
     // let name = "dbgtbUpdateBucketUtil"; // has idiv
     let sym_va = function_luts.name_map[name];
     let info = &function_luts.infos[&sym_va];
@@ -146,10 +145,36 @@ fn main() {
 
     println!("}}");
 
-    let cfg = code_flow.build_cfg();
-    let dominators = dominators::simple_fast(&cfg, NodeIndex::new(0));
+    let ssa = Ssa::build(&code_flow, info);
 
-    let _ssa = Ssa::build(&code_flow, info);
+    for (i, block) in ssa.blocks.iter().enumerate() {
+        eprintln!("block_{i}:");
 
-    dbg!(dominators);
+        for &def_id in &block.definitions {
+            let def = &ssa.definitions[def_id.index()];
+
+            let DefinitionTarget::Register(_) = def.target;
+            eprint!("    x{} = ", def.id.0);
+
+            match &def.value {
+                DefinitionValue::External => eprintln!("external"),
+                DefinitionValue::Undefined => eprintln!("undefined"),
+                DefinitionValue::Const(c) => eprintln!("{c}"),
+                DefinitionValue::Value(_) | DefinitionValue::Add { .. } => eprintln!("..."),
+                DefinitionValue::Phi { dependencies } => {
+                    eprint!("phi(");
+
+                    for dep in &dependencies[..1] {
+                        eprint!("x{}@b{}", dep.value.0, dep.source.index());
+                    }
+
+                    for dep in &dependencies[1..] {
+                        eprint!(", x{}@b{}", dep.value.0, dep.source.index());
+                    }
+
+                    eprintln!(")");
+                }
+            }
+        }
+    }
 }

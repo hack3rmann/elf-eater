@@ -5,7 +5,7 @@ use elf_eater_analyzer::{
         semantic::{ArithmeticInstruction, ArithmeticOpKind, SemanticInstruction},
     },
     context::DisassemblerContext,
-    ir::reg_ssa::{DefinitionTarget, DefinitionValue, Ssa},
+    ir::reg_ssa::{DefinitionTarget, Ssa},
 };
 use iced_x86::{Mnemonic, NasmFormatter};
 use std::{
@@ -154,28 +154,7 @@ fn main() {
             let def = &ssa.definitions[def_id.index()];
 
             let DefinitionTarget::Register(_) = def.target;
-            eprint!("    x{} = ", def.id.0);
-
-            match &def.value {
-                DefinitionValue::External => eprint!("external"),
-                DefinitionValue::Undefined => eprint!("undefined"),
-                DefinitionValue::Const(c) => eprint!("{c}"),
-                DefinitionValue::Value(id) => eprint!("x{}", id.0),
-                DefinitionValue::Add { .. } => eprint!("..."),
-                DefinitionValue::Phi { dependencies } => {
-                    eprint!("phi(");
-
-                    for dep in &dependencies[..1] {
-                        eprint!("x{}@b{}", dep.value.0, dep.source.index());
-                    }
-
-                    for dep in &dependencies[1..] {
-                        eprint!(", x{}@b{}", dep.value.0, dep.source.index());
-                    }
-
-                    eprint!(")");
-                }
-            }
+            eprint!("    x{} = {}", def.id.0, def.value);
 
             let instructions = &info.instructions[def.span.range()];
 

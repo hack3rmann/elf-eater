@@ -8,6 +8,10 @@ use std::{
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InstructionId(pub u32);
 
+impl InstructionId {
+    pub const INVALID: Self = InstructionId(u32::MAX);
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SemanticInstruction {
     /// `call 0xWHATEVER`

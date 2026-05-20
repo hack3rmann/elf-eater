@@ -15,7 +15,10 @@ use petgraph::{
     graph::{DiGraph, NodeIndex},
 };
 use smallvec::{SmallVec, smallvec};
-use std::array;
+use std::{
+    array,
+    fmt::{self, Display},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DefinitionTarget {
@@ -32,6 +35,16 @@ impl ValueId {
 impl Default for ValueId {
     fn default() -> Self {
         Self::INVALID
+    }
+}
+
+impl Display for ValueId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if *self == Self::INVALID {
+            return f.write_str("nil");
+        }
+
+        write!(f, "x{}", self.0)
     }
 }
 
@@ -52,20 +65,92 @@ pub struct Dependency {
     pub source: BlockId,
 }
 
+impl Display for Dependency {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "x{}@b{}", self.value.0, self.source.index())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AsmDefinitionValue {
+    Value(RegOrConst64),
+    Add {
+        left: RegOrConst64,
+        right: RegOrConst64,
+    },
+}
+
+impl AsmDefinitionValue {
+    pub fn resolve(self, resolve: impl Fn(Register64) -> ValueId) -> DefinitionValue {
+        let resolve = move |value: RegOrConst64| -> ValueSource {
+            match value {
+                RegOrConst64::Reg(reg) => ValueSource::Value(resolve(reg)),
+                RegOrConst64::Const(c) => ValueSource::Const(c),
+            }
+        };
+
+        match self {
+            Self::Value(value) => DefinitionValue::Value(resolve(value)),
+            Self::Add { left, right } => DefinitionValue::Add {
+                left: resolve(left),
+                right: resolve(right),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ValueSource {
+    Const(u64),
+    Value(ValueId),
+}
+
+impl Display for ValueSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ValueSource::Const(c) => c.fmt(f),
+            ValueSource::Value(id) => id.fmt(f),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DefinitionValue {
     #[default]
     Undefined,
     External,
-    Const(u64),
-    Value(ValueId),
+    Value(ValueSource),
     Add {
-        left: ValueId,
-        right: ValueId,
+        left: ValueSource,
+        right: ValueSource,
     },
     Phi {
         dependencies: SmallVec<[Dependency; 2]>,
     },
+}
+
+impl Display for DefinitionValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DefinitionValue::Undefined => f.write_str("undefined"),
+            DefinitionValue::External => f.write_str("external"),
+            DefinitionValue::Value(source) => source.fmt(f),
+            DefinitionValue::Add { left, right } => write!(f, "add({left}, {right})"),
+            DefinitionValue::Phi { dependencies } => {
+                f.write_str("phi(")?;
+
+                for dep in &dependencies[..1] {
+                    dep.fmt(f)?;
+                }
+
+                for dep in &dependencies[1..] {
+                    write!(f, ", {dep}")?;
+                }
+
+                f.write_str(")")
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -250,7 +335,7 @@ impl Ssa {
                     let def_id = next_def();
                     definitions.push(Definition {
                         id: value,
-                        value: def_value,
+                        value: def_value.resolve(|reg| last_def[reg as usize]),
                         span,
                         target: DefinitionTarget::Register(target),
                     });
@@ -346,15 +431,15 @@ fn make_counter<T>(id: impl Fn(u32) -> T) -> impl FnMut() -> T {
 
 fn visit_assignment(
     instruction: SemanticInstruction,
-    visit: &mut impl FnMut(Register64, DefinitionValue),
+    visit: &mut impl FnMut(Register64, AsmDefinitionValue),
 ) {
     match instruction {
         SemanticInstruction::Assignment {
             destination,
-            source: RegOrConst64::Const(source),
+            source,
             slice: RegisterSliceKind::R64,
         } => {
-            visit(destination, DefinitionValue::Const(source));
+            visit(destination, AsmDefinitionValue::Value(source));
         }
         SemanticInstruction::LoadAddress {
             destination: GpRegister {
@@ -430,7 +515,10 @@ fn visit_assignment(
             },
             ..
         } => {
-            visit(destination, DefinitionValue::Const(42));
+            visit(
+                destination,
+                AsmDefinitionValue::Value(RegOrConst64::Const(42)),
+            );
         }
         SemanticInstruction::Exchange {
             first: RegOrMemory::Reg(first),
@@ -459,8 +547,8 @@ fn visit_assignment(
                 },
             ..
         } => {
-            visit(first, DefinitionValue::Const(42));
-            visit(second, DefinitionValue::Const(42));
+            visit(first, AsmDefinitionValue::Value(RegOrConst64::Const(42)));
+            visit(second, AsmDefinitionValue::Value(RegOrConst64::Const(42)));
         }
         _ => (),
     }

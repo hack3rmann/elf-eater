@@ -21,12 +21,6 @@ use std::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum DefinitionTarget {
-    Temporary,
-    Register(Register64),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ValueId(pub u32);
 
 impl ValueId {
@@ -53,6 +47,15 @@ impl Display for ValueId {
 pub enum ValueType {
     Temporary,
     Register(Register64),
+}
+
+impl Display for ValueType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ValueType::Temporary => f.write_str("tmp"),
+            ValueType::Register(reg) => reg.fmt(f),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -209,7 +212,6 @@ impl Display for DefinitionValue {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Definition {
     pub id: ValueId,
-    pub target: DefinitionTarget,
     pub value: DefinitionValue,
     pub span: InstructionSpan,
 }
@@ -311,7 +313,6 @@ impl Ssa {
                         dependencies: smallvec![],
                     },
                     span: InstructionSpan::EMPTY,
-                    target: DefinitionTarget::Register(reg),
                 });
 
                 blocks[block_index].definitions.push(def_id);
@@ -344,7 +345,6 @@ impl Ssa {
             let def_id = next_def();
             definitions.push(Definition {
                 id: root_value_id,
-                target: DefinitionTarget::Register(reg),
                 value: DefinitionValue::External,
                 span: InstructionSpan::EMPTY,
             });
@@ -369,7 +369,9 @@ impl Ssa {
 
             // The node contains Phi for the selected register
             for def in phis {
-                let DefinitionTarget::Register(reg) = def.target else {
+                let value = values[def.id.0 as usize];
+
+                let ValueType::Register(reg) = value.ty else {
                     continue;
                 };
 
@@ -389,11 +391,6 @@ impl Ssa {
                         AsmVisitTarget::Register(reg) => ValueType::Register(reg),
                     };
 
-                    let def_target = match target {
-                        AsmVisitTarget::NewValue => DefinitionTarget::Temporary,
-                        AsmVisitTarget::Register(reg) => DefinitionTarget::Register(reg),
-                    };
-
                     let value_id = next_value();
                     values.push(Value {
                         id: value_id,
@@ -406,7 +403,6 @@ impl Ssa {
                         id: value_id,
                         value: def_value.resolve(|reg| last_def[reg as usize]),
                         span,
-                        target: def_target,
                     });
 
                     // Update the last definition only after name resolution
@@ -437,9 +433,10 @@ impl Ssa {
             &mut |_, node_id| {
                 for &def_id in &blocks[node_id as usize].definitions {
                     let defs = &mut definitions[def_id.index()];
+                    let value = values[defs.id.0 as usize];
 
                     // Break, because first 0..N definitions are always phi entries for registers
-                    let DefinitionTarget::Register(phi_reg) = defs.target else {
+                    let ValueType::Register(phi_reg) = value.ty else {
                         break;
                     };
                     let DefinitionValue::Phi { dependencies } = &mut defs.value else {

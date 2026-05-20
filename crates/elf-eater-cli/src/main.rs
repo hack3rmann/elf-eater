@@ -152,8 +152,9 @@ fn main() {
 
         for &def_id in &block.definitions {
             let def = &ssa.definitions[def_id.index()];
+            let value = ssa.values[def.id.0 as usize];
 
-            eprint!("    x{} = {}", def.id.0, def.value);
+            eprint!("    let x{}: {} = {}", def.id.0, value.ty, def.value);
 
             let instructions = &info.instructions[def.span.range()];
 

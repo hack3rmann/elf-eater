@@ -5,7 +5,7 @@ use elf_eater_analyzer::{
         semantic::{ArithmeticInstruction, ArithmeticOpKind, SemanticInstruction},
     },
     context::DisassemblerContext,
-    ir::reg_ssa::{DefinitionTarget, Ssa},
+    ir::reg_ssa::Ssa,
 };
 use iced_x86::{Mnemonic, NasmFormatter};
 use std::{
@@ -98,9 +98,9 @@ fn main() {
 
     // let name = "kgumini";
     // let name = "qctdccso";
-    // let name = "kguudltr";
+    let name = "kguudltr";
     // let name = "Java_oracle_streams_XStreamIn_XStreamInAttachNative"; // has div
-    let name = "kghfnd"; // has imul
+    // let name = "kghfnd"; // has imul
     // let name = "dbgtbUpdateBucketUtil"; // has idiv
     let sym_va = function_luts.name_map[name];
     let info = &function_luts.infos[&sym_va];
@@ -153,7 +153,6 @@ fn main() {
         for &def_id in &block.definitions {
             let def = &ssa.definitions[def_id.index()];
 
-            let DefinitionTarget::Register(_) = def.target;
             eprint!("    x{} = {}", def.id.0, def.value);
 
             let instructions = &info.instructions[def.span.range()];

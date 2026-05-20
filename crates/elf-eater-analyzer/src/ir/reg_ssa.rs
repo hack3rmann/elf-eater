@@ -5,8 +5,8 @@ use crate::{
         references::FunctionInfo,
         semantic::{
             ArithmeticInstruction, ArithmeticOperands, ExtendedGpRegister, GpRegister,
-            RegOrConst64, RegOrMemory, Register64, RegisterSliceKind, Registers64,
-            SemanticInstruction, SizedRegOrMemory,
+            MemoryExpression, RegOrConst64, RegOrMemory, Register64, RegisterSliceKind,
+            Registers64, SemanticInstruction, SizedRegOrMemory,
         },
     },
 };
@@ -22,6 +22,7 @@ use std::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DefinitionTarget {
+    Temporary,
     Register(Register64),
 }
 
@@ -50,6 +51,7 @@ impl Display for ValueId {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ValueType {
+    Temporary,
     Register(Register64),
 }
 
@@ -72,26 +74,40 @@ impl Display for Dependency {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AsmRef {
+    Asm(RegOrConst64),
+    Ssa(ValueId),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AsmDefinitionValue {
-    Value(RegOrConst64),
-    Add {
-        left: RegOrConst64,
-        right: RegOrConst64,
-    },
+    Value(AsmRef),
+    Add { left: AsmRef, right: AsmRef },
+    Sub { left: AsmRef, right: AsmRef },
+    Mul { left: AsmRef, right: AsmRef },
 }
 
 impl AsmDefinitionValue {
     pub fn resolve(self, resolve: impl Fn(Register64) -> ValueId) -> DefinitionValue {
-        let resolve = move |value: RegOrConst64| -> ValueSource {
+        let resolve = move |value: AsmRef| -> ValueSource {
             match value {
-                RegOrConst64::Reg(reg) => ValueSource::Value(resolve(reg)),
-                RegOrConst64::Const(c) => ValueSource::Const(c),
+                AsmRef::Asm(RegOrConst64::Reg(reg)) => ValueSource::Value(resolve(reg)),
+                AsmRef::Asm(RegOrConst64::Const(c)) => ValueSource::Const(c),
+                AsmRef::Ssa(id) => ValueSource::Value(id),
             }
         };
 
         match self {
             Self::Value(value) => DefinitionValue::Value(resolve(value)),
             Self::Add { left, right } => DefinitionValue::Add {
+                left: resolve(left),
+                right: resolve(right),
+            },
+            Self::Sub { left, right } => DefinitionValue::Sub {
+                left: resolve(left),
+                right: resolve(right),
+            },
+            Self::Mul { left, right } => DefinitionValue::Mul {
                 left: resolve(left),
                 right: resolve(right),
             },
@@ -124,6 +140,14 @@ pub enum DefinitionValue {
         left: ValueSource,
         right: ValueSource,
     },
+    Sub {
+        left: ValueSource,
+        right: ValueSource,
+    },
+    Mul {
+        left: ValueSource,
+        right: ValueSource,
+    },
     Phi {
         dependencies: SmallVec<[Dependency; 2]>,
     },
@@ -136,6 +160,8 @@ impl Display for DefinitionValue {
             DefinitionValue::External => f.write_str("external"),
             DefinitionValue::Value(source) => source.fmt(f),
             DefinitionValue::Add { left, right } => write!(f, "add({left}, {right})"),
+            DefinitionValue::Sub { left, right } => write!(f, "sub({left}, {right})"),
+            DefinitionValue::Mul { left, right } => write!(f, "mul({left}, {right})"),
             DefinitionValue::Phi { dependencies } => {
                 f.write_str("phi(")?;
 
@@ -202,7 +228,12 @@ impl Ssa {
 
             for &instruction in instructions {
                 visit_assignment(instruction, &mut |destination, _| {
-                    def_sources[destination as usize].push(block_id);
+                    let AsmVisitTarget::Register(reg) = destination else {
+                        return ValueId::INVALID;
+                    };
+
+                    def_sources[reg as usize].push(block_id);
+                    ValueId::INVALID
                 });
             }
         }
@@ -311,7 +342,10 @@ impl Ssa {
 
             // The node contains Phi for the selected register
             for def in phis {
-                let DefinitionTarget::Register(reg) = def.target;
+                let DefinitionTarget::Register(reg) = def.target else {
+                    continue;
+                };
+
                 last_def[reg as usize] = def.id;
             }
 
@@ -323,24 +357,38 @@ impl Ssa {
                 let span = InstructionSpan::new(i, i + 1);
 
                 visit_assignment(instruction, &mut |target, def_value| {
-                    let value = next_value();
+                    let value_type = match target {
+                        AsmVisitTarget::NewValue => ValueType::Temporary,
+                        AsmVisitTarget::Register(reg) => ValueType::Register(reg),
+                    };
+
+                    let def_target = match target {
+                        AsmVisitTarget::NewValue => DefinitionTarget::Temporary,
+                        AsmVisitTarget::Register(reg) => DefinitionTarget::Register(reg),
+                    };
+
+                    let value_id = next_value();
                     values.push(Value {
-                        id: value,
-                        ty: ValueType::Register(target),
+                        id: value_id,
+                        ty: value_type,
                     });
 
-                    last_def[target as usize] = value;
+                    if let AsmVisitTarget::Register(reg) = target {
+                        last_def[reg as usize] = value_id;
+                    }
 
                     // FIXME: Missing the actual RHS
                     let def_id = next_def();
                     definitions.push(Definition {
-                        id: value,
+                        id: value_id,
                         value: def_value.resolve(|reg| last_def[reg as usize]),
                         span,
-                        target: DefinitionTarget::Register(target),
+                        target: def_target,
                     });
 
                     blocks[node_id as usize].definitions.push(def_id);
+
+                    value_id
                 });
             }
 
@@ -362,7 +410,10 @@ impl Ssa {
                 for &def_id in &blocks[node_id as usize].definitions {
                     let defs = &mut definitions[def_id.index()];
 
-                    let DefinitionTarget::Register(phi_reg) = defs.target;
+                    // Break, because first 0..N definitions are always phi entries for registers
+                    let DefinitionTarget::Register(phi_reg) = defs.target else {
+                        break;
+                    };
                     let DefinitionValue::Phi { dependencies } = &mut defs.value else {
                         break;
                     };
@@ -429,9 +480,148 @@ fn make_counter<T>(id: impl Fn(u32) -> T) -> impl FnMut() -> T {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AsmVisitTarget {
+    NewValue,
+    Register(Register64),
+}
+
+fn visit_memory_expr(
+    expr: MemoryExpression,
+    target: AsmVisitTarget,
+    visit: &mut impl FnMut(AsmVisitTarget, AsmDefinitionValue) -> ValueId,
+) -> ValueSource {
+    match expr {
+        MemoryExpression::Absolute {
+            base: Some(base),
+            index: Some(index),
+            scale,
+            displacement,
+        } => {
+            let index_times_scale = visit(
+                AsmVisitTarget::NewValue,
+                AsmDefinitionValue::Mul {
+                    left: AsmRef::Asm(RegOrConst64::Reg(index)),
+                    right: AsmRef::Asm(RegOrConst64::Const(scale as u64)),
+                },
+            );
+
+            let base_plus_scaled_index = visit(
+                AsmVisitTarget::NewValue,
+                AsmDefinitionValue::Add {
+                    left: AsmRef::Asm(RegOrConst64::Reg(base)),
+                    right: AsmRef::Ssa(index_times_scale),
+                },
+            );
+
+            let left = AsmRef::Ssa(base_plus_scaled_index);
+
+            let value = if displacement > 0 {
+                AsmDefinitionValue::Add {
+                    left,
+                    right: AsmRef::Asm(RegOrConst64::Const(displacement as u64)),
+                }
+            } else {
+                AsmDefinitionValue::Sub {
+                    left,
+                    right: AsmRef::Asm(RegOrConst64::Const(-displacement as u64)),
+                }
+            };
+
+            let id = visit(target, value);
+
+            ValueSource::Value(id)
+        }
+        MemoryExpression::Absolute {
+            base: None,
+            index: Some(index),
+            scale,
+            displacement,
+        } => {
+            let index_times_scale = visit(
+                AsmVisitTarget::NewValue,
+                AsmDefinitionValue::Mul {
+                    left: AsmRef::Asm(RegOrConst64::Reg(index)),
+                    right: AsmRef::Asm(RegOrConst64::Const(scale as u64)),
+                },
+            );
+
+            let left = AsmRef::Ssa(index_times_scale);
+
+            let value = if displacement > 0 {
+                AsmDefinitionValue::Add {
+                    left,
+                    right: AsmRef::Asm(RegOrConst64::Const(displacement as u64)),
+                }
+            } else {
+                AsmDefinitionValue::Sub {
+                    left,
+                    right: AsmRef::Asm(RegOrConst64::Const(-displacement as u64)),
+                }
+            };
+
+            let id = visit(target, value);
+
+            ValueSource::Value(id)
+        }
+        MemoryExpression::Absolute {
+            base: Some(base),
+            index: None,
+            scale: _,
+            displacement,
+        } => {
+            let left = AsmRef::Asm(RegOrConst64::Reg(base));
+
+            let value = if displacement > 0 {
+                AsmDefinitionValue::Add {
+                    left,
+                    right: AsmRef::Asm(RegOrConst64::Const(displacement as u64)),
+                }
+            } else {
+                AsmDefinitionValue::Sub {
+                    left,
+                    right: AsmRef::Asm(RegOrConst64::Const(-displacement as u64)),
+                }
+            };
+
+            let id = visit(target, value);
+
+            ValueSource::Value(id)
+        }
+        MemoryExpression::Absolute {
+            base: None,
+            index: None,
+            scale: _,
+            displacement,
+        } => {
+            if let AsmVisitTarget::Register(_) = target {
+                visit(
+                    target,
+                    AsmDefinitionValue::Value(AsmRef::Asm(RegOrConst64::Const(
+                        displacement as u64,
+                    ))),
+                );
+            }
+
+            ValueSource::Const(displacement as u64)
+        }
+        // FIXME(hack3rmann): actually depends on `RIP`
+        MemoryExpression::Relative { address } => {
+            if let AsmVisitTarget::Register(_) = target {
+                visit(
+                    target,
+                    AsmDefinitionValue::Value(AsmRef::Asm(RegOrConst64::Const(address))),
+                );
+            }
+
+            ValueSource::Const(address)
+        }
+    }
+}
+
 fn visit_assignment(
     instruction: SemanticInstruction,
-    visit: &mut impl FnMut(Register64, AsmDefinitionValue),
+    visit: &mut impl FnMut(AsmVisitTarget, AsmDefinitionValue) -> ValueId,
 ) {
     match instruction {
         SemanticInstruction::Assignment {
@@ -439,7 +629,30 @@ fn visit_assignment(
             source,
             slice: RegisterSliceKind::R64,
         } => {
-            visit(destination, AsmDefinitionValue::Value(source));
+            visit(
+                AsmVisitTarget::Register(destination),
+                AsmDefinitionValue::Value(AsmRef::Asm(source)),
+            );
+        }
+        SemanticInstruction::Exchange {
+            first: RegOrMemory::Reg(destination),
+            second: RegOrMemory::Reg(source),
+            ..
+        } => {
+            visit(
+                AsmVisitTarget::Register(destination),
+                AsmDefinitionValue::Value(AsmRef::Asm(RegOrConst64::Reg(source))),
+            );
+        }
+        SemanticInstruction::LoadAddress {
+            destination:
+                GpRegister {
+                    full: destination,
+                    slice_kind: RegisterSliceKind::R64,
+                },
+            expr,
+        } => {
+            visit_memory_expr(expr, AsmVisitTarget::Register(destination), visit);
         }
         SemanticInstruction::LoadAddress {
             destination: GpRegister {
@@ -516,16 +729,11 @@ fn visit_assignment(
             ..
         } => {
             visit(
-                destination,
-                AsmDefinitionValue::Value(RegOrConst64::Const(42)),
+                AsmVisitTarget::Register(destination),
+                AsmDefinitionValue::Value(AsmRef::Asm(RegOrConst64::Const(42))),
             );
         }
-        SemanticInstruction::Exchange {
-            first: RegOrMemory::Reg(first),
-            second: RegOrMemory::Reg(second),
-            ..
-        }
-        | SemanticInstruction::Arithmetic(ArithmeticInstruction {
+        SemanticInstruction::Arithmetic(ArithmeticInstruction {
             operands:
                 ArithmeticOperands::ResultExtendedExpression {
                     result_hi: SizedRegOrMemory::Reg(GpRegister { full: first, .. }),
@@ -547,8 +755,14 @@ fn visit_assignment(
                 },
             ..
         } => {
-            visit(first, AsmDefinitionValue::Value(RegOrConst64::Const(42)));
-            visit(second, AsmDefinitionValue::Value(RegOrConst64::Const(42)));
+            visit(
+                AsmVisitTarget::Register(first),
+                AsmDefinitionValue::Value(AsmRef::Asm(RegOrConst64::Const(42))),
+            );
+            visit(
+                AsmVisitTarget::Register(second),
+                AsmDefinitionValue::Value(AsmRef::Asm(RegOrConst64::Const(42))),
+            );
         }
         _ => (),
     }

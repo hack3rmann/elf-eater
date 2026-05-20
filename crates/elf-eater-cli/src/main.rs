@@ -148,7 +148,7 @@ fn main() {
     let ssa = Ssa::build(&code_flow, info);
 
     for (i, block) in ssa.blocks.iter().enumerate() {
-        eprintln!("block_{i}:");
+        eprintln!("b{i}:");
 
         for &def_id in &block.definitions {
             let def = &ssa.definitions[def_id.index()];
@@ -165,6 +165,32 @@ fn main() {
                 }
                 _ => eprintln!(),
             }
+        }
+
+        match code_flow.blocks[i].terminator {
+            CodeBlockTerminator::InternalJump {
+                target: BlockId(target),
+                address: _,
+            }
+            | CodeBlockTerminator::Fallthrough {
+                target: BlockId(target),
+            } => {
+                println!("    $goto b{target}")
+            }
+            CodeBlockTerminator::InternalBranch {
+                jump_to: BlockId(jump_to),
+                fallthrough: BlockId(fallthrough),
+                address: _,
+            } => println!("    $branch b{jump_to}, b{fallthrough}"),
+            CodeBlockTerminator::Return => println!("    $return"),
+            CodeBlockTerminator::ExternalJump { address } => {
+                println!("    $goto <unknown@0x{address:x}>")
+            }
+            CodeBlockTerminator::ExternalBranch {
+                fallthrough: BlockId(fallthrough),
+                address,
+            } => println!("    $branch <unknown@0x{address:x}>, b{fallthrough}"),
+            CodeBlockTerminator::IndirectJump => println!("    $goto <unknown>"),
         }
     }
 }

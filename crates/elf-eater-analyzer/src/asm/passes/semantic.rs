@@ -706,6 +706,18 @@ impl Display for RegOrConst64 {
     }
 }
 
+impl From<RegOrConst> for RegOrConst64 {
+    fn from(value: RegOrConst) -> Self {
+        match value {
+            RegOrConst::Reg(GpRegister {
+                full: reg,
+                slice_kind: _,
+            }) => Self::Reg(reg),
+            RegOrConst::Const { value, size: _ } => Self::Const(value),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExtendedGpRegister {
     pub hi: Option<GpRegister>,
@@ -1554,6 +1566,7 @@ fn lift_push(instr: Instruction) -> Option<SemanticInstruction> {
     }
 
     Some(SemanticInstruction::Push {
+        // BUG(hack3rmann): if it's immediate8, it must be **sign-extended** to full 64 bits
         operand: lift_operand(&instr, 0)?,
     })
 }

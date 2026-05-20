@@ -5,7 +5,7 @@ use crate::{
         references::FunctionInfo,
         semantic::{
             ArithmeticInstruction, ArithmeticOperands, ExtendedGpRegister, GpRegister,
-            MemoryExpression, RegOrConst64, RegOrMemory, Register64, RegisterSliceKind,
+            MemoryExpression, Operand, RegOrConst64, RegOrMemory, Register64, RegisterSliceKind,
             Registers64, SemanticInstruction, SizedRegOrMemory,
         },
     },
@@ -79,12 +79,23 @@ pub enum AsmRef {
     Ssa(ValueId),
 }
 
+impl From<ValueSource> for AsmRef {
+    fn from(value: ValueSource) -> Self {
+        match value {
+            ValueSource::Const(c) => AsmRef::Asm(RegOrConst64::Const(c)),
+            ValueSource::Value(id) => AsmRef::Ssa(id),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AsmDefinitionValue {
     Value(AsmRef),
     Add { left: AsmRef, right: AsmRef },
     Sub { left: AsmRef, right: AsmRef },
     Mul { left: AsmRef, right: AsmRef },
+    Load { address: AsmRef },
+    Store { address: AsmRef, value: AsmRef },
 }
 
 impl AsmDefinitionValue {
@@ -110,6 +121,13 @@ impl AsmDefinitionValue {
             Self::Mul { left, right } => DefinitionValue::Mul {
                 left: resolve(left),
                 right: resolve(right),
+            },
+            Self::Load { address } => DefinitionValue::Load {
+                address: resolve(address),
+            },
+            Self::Store { address, value } => DefinitionValue::Store {
+                address: resolve(address),
+                value: resolve(value),
             },
         }
     }
@@ -148,6 +166,13 @@ pub enum DefinitionValue {
         left: ValueSource,
         right: ValueSource,
     },
+    Load {
+        address: ValueSource,
+    },
+    Store {
+        address: ValueSource,
+        value: ValueSource,
+    },
     Phi {
         dependencies: SmallVec<[Dependency; 2]>,
     },
@@ -162,6 +187,8 @@ impl Display for DefinitionValue {
             DefinitionValue::Add { left, right } => write!(f, "add({left}, {right})"),
             DefinitionValue::Sub { left, right } => write!(f, "sub({left}, {right})"),
             DefinitionValue::Mul { left, right } => write!(f, "mul({left}, {right})"),
+            DefinitionValue::Load { address } => write!(f, "load({address})"),
+            DefinitionValue::Store { address, value } => write!(f, "store({address}, {value})"),
             DefinitionValue::Phi { dependencies } => {
                 f.write_str("phi(")?;
 
@@ -373,10 +400,6 @@ impl Ssa {
                         ty: value_type,
                     });
 
-                    if let AsmVisitTarget::Register(reg) = target {
-                        last_def[reg as usize] = value_id;
-                    }
-
                     // FIXME: Missing the actual RHS
                     let def_id = next_def();
                     definitions.push(Definition {
@@ -385,6 +408,11 @@ impl Ssa {
                         span,
                         target: def_target,
                     });
+
+                    // Update the last definition only after name resolution
+                    if let AsmVisitTarget::Register(reg) = target {
+                        last_def[reg as usize] = value_id;
+                    }
 
                     blocks[node_id as usize].definitions.push(def_id);
 
@@ -653,6 +681,151 @@ fn visit_assignment(
             expr,
         } => {
             visit_memory_expr(expr, AsmVisitTarget::Register(destination), visit);
+        }
+        SemanticInstruction::Load {
+            destination:
+                GpRegister {
+                    full: destination,
+                    slice_kind: RegisterSliceKind::R64,
+                },
+            source,
+        } => {
+            let address = visit_memory_expr(source, AsmVisitTarget::NewValue, visit);
+
+            visit(
+                AsmVisitTarget::Register(destination),
+                AsmDefinitionValue::Load {
+                    address: AsmRef::from(address),
+                },
+            );
+        }
+        SemanticInstruction::Store {
+            destination,
+            source,
+        } => {
+            let source = RegOrConst64::from(source);
+            let address = visit_memory_expr(destination, AsmVisitTarget::NewValue, visit);
+
+            visit(
+                AsmVisitTarget::NewValue,
+                AsmDefinitionValue::Store {
+                    address: AsmRef::from(address),
+                    value: AsmRef::Asm(source),
+                },
+            );
+        }
+        SemanticInstruction::Push { operand } => {
+            // FIXME(hack3rmann): register size
+            let value = match operand {
+                Operand::Register(GpRegister {
+                    full: Register64::Rsp,
+                    ..
+                }) => {
+                    let old_rsp = visit(
+                        AsmVisitTarget::NewValue,
+                        AsmDefinitionValue::Value(AsmRef::Asm(RegOrConst64::Reg(Register64::Rsp))),
+                    );
+
+                    AsmRef::Ssa(old_rsp)
+                }
+                Operand::Register(GpRegister { full, .. }) => AsmRef::Asm(RegOrConst64::Reg(full)),
+                Operand::Const(c) => AsmRef::Asm(RegOrConst64::Const(c)),
+                Operand::Memory(expr) => {
+                    let address = visit_memory_expr(expr, AsmVisitTarget::NewValue, visit);
+                    let value = visit(
+                        AsmVisitTarget::NewValue,
+                        AsmDefinitionValue::Load {
+                            address: address.into(),
+                        },
+                    );
+
+                    AsmRef::Ssa(value)
+                }
+            };
+
+            // new_sp = sp - 8
+            let new_sp = visit(
+                AsmVisitTarget::Register(Register64::Rsp),
+                AsmDefinitionValue::Sub {
+                    left: AsmRef::Asm(RegOrConst64::Reg(Register64::Rsp)),
+                    right: AsmRef::Asm(RegOrConst64::Const(8)),
+                },
+            );
+
+            visit(
+                AsmVisitTarget::NewValue,
+                AsmDefinitionValue::Store {
+                    address: AsmRef::Ssa(new_sp),
+                    value,
+                },
+            );
+        }
+        SemanticInstruction::Pop {
+            operand,
+            slice: RegisterSliceKind::R64,
+        } => {
+            match operand {
+                // # OP is RSP
+                // rsp = load(rsp)
+                RegOrMemory::Reg(Register64::Rsp) => {
+                    visit(
+                        AsmVisitTarget::Register(Register64::Rsp),
+                        AsmDefinitionValue::Load {
+                            address: AsmRef::Asm(RegOrConst64::Reg(Register64::Rsp)),
+                        },
+                    );
+                }
+                // # OP is register and not RSP
+                // op = load(rsp)
+                // rsp += 8
+                RegOrMemory::Reg(reg) => {
+                    visit(
+                        AsmVisitTarget::Register(reg),
+                        AsmDefinitionValue::Load {
+                            address: AsmRef::Asm(RegOrConst64::Reg(Register64::Rsp)),
+                        },
+                    );
+
+                    visit(
+                        AsmVisitTarget::Register(Register64::Rsp),
+                        AsmDefinitionValue::Add {
+                            left: AsmRef::Asm(RegOrConst64::Reg(Register64::Rsp)),
+                            right: AsmRef::Asm(RegOrConst64::Const(8)),
+                        },
+                    );
+                }
+                // # OP is memory
+                // tmp = load(rsp)
+                // rsp += 8
+                // addr = visit_addr(op)
+                // _ = store(addr, tmp)
+                RegOrMemory::Mem(expr) => {
+                    let loaded_tmp = visit(
+                        AsmVisitTarget::NewValue,
+                        AsmDefinitionValue::Load {
+                            address: AsmRef::Asm(RegOrConst64::Reg(Register64::Rsp)),
+                        },
+                    );
+
+                    visit(
+                        AsmVisitTarget::Register(Register64::Rsp),
+                        AsmDefinitionValue::Add {
+                            left: AsmRef::Asm(RegOrConst64::Reg(Register64::Rsp)),
+                            right: AsmRef::Asm(RegOrConst64::Const(8)),
+                        },
+                    );
+
+                    let address = visit_memory_expr(expr, AsmVisitTarget::NewValue, visit);
+
+                    visit(
+                        AsmVisitTarget::NewValue,
+                        AsmDefinitionValue::Store {
+                            address: address.into(),
+                            value: AsmRef::Ssa(loaded_tmp),
+                        },
+                    );
+                }
+            }
         }
         SemanticInstruction::LoadAddress {
             destination: GpRegister {

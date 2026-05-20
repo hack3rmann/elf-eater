@@ -80,6 +80,8 @@ pub struct Definition {
 pub struct DefinitionId(pub u32);
 
 impl DefinitionId {
+    pub const INVALID: Self = Self(u32::MAX);
+
     pub const fn index(self) -> usize {
         self.0 as usize
     }
@@ -183,12 +185,18 @@ impl Ssa {
             idom_inverse[dom_id.index()].push(index.index() as u32);
         }
 
+        type DefStacks = Vec<[ValueId; Register64::COUNT]>;
+
+        let mut def_stack: DefStacks = vec![[ValueId::INVALID; Register64::COUNT]];
+
         for reg in Register64::ALL {
             let root_value_id = next_value();
             values.push(Value {
                 id: root_value_id,
                 ty: ValueType::Register(reg),
             });
+
+            def_stack[0][reg as usize] = root_value_id;
 
             let def_id = next_def();
             definitions.push(Definition {
@@ -201,104 +209,94 @@ impl Ssa {
             if let Some(first) = blocks.first_mut() {
                 first.definitions.push(def_id);
             }
-
-            let mut def_stack = vec![root_value_id];
-            let mut finalized_defs = vec![ValueId::INVALID; flow.blocks.len()];
-
-            let mut enter = |def_stack: &mut Vec<ValueId>, node_id| {
-                let mut cur_definitions = blocks[node_id as usize]
-                    .definitions
-                    .iter()
-                    .map(|&id| &definitions[id.index()]);
-
-                let parent_def = def_stack.last().copied().expect("def_stack is never empty");
-                let mut last_def = parent_def;
-
-                // The node contains Phi for the selected register
-                if let Some(def) = cur_definitions
-                    .find(|&def| matches!(def.target, DefinitionTarget::Register(phi_reg) if phi_reg == reg))
-                {
-                    last_def = def.id;
-                }
-
-                let block = &flow.blocks[node_id as usize];
-                let block_instructions = &info.instructions[block.span.range()];
-                let block_start = block.span.range().start as u32;
-
-                for (&instruction, i) in block_instructions.iter().zip(block_start..) {
-                    let span = InstructionSpan::new(i, i + 1);
-
-                    visit_assignment(instruction, &mut |target, def_value| {
-                        if target != reg {
-                            return;
-                        }
-
-                        let value = next_value();
-                        values.push(Value {
-                            id: value,
-                            ty: ValueType::Register(reg),
-                        });
-
-                        last_def = value;
-
-                        // FIXME: Missing the actual RHS
-                        let def_id = next_def();
-                        definitions.push(Definition {
-                            id: value,
-                            value: def_value,
-                            span,
-                            target: DefinitionTarget::Register(reg),
-                        });
-
-                        blocks[node_id as usize].definitions.push(def_id);
-                    });
-                }
-
-                def_stack.push(last_def);
-                finalized_defs[node_id as usize] = last_def;
-            };
-
-            let mut leave = |def_stack: &mut Vec<ValueId>, _| {
-                def_stack.pop();
-            };
-
-            iterative_dfs(&idom_inverse, 0, &mut def_stack, &mut enter, &mut leave);
-
-            iterative_dfs(
-                &idom_inverse,
-                0,
-                &mut (),
-                &mut |_, node_id| {
-                    for &def_id in &blocks[node_id as usize].definitions {
-                        let defs = &mut definitions[def_id.index()];
-
-                        let DefinitionTarget::Register(phi_reg) = defs.target;
-
-                        if phi_reg != reg {
-                            continue;
-                        }
-
-                        let DefinitionValue::Phi { dependencies } = &mut defs.value else {
-                            break;
-                        };
-
-                        for parent in cfg.neighbors_directed(
-                            NodeIndex::new(node_id as usize),
-                            petgraph::Direction::Incoming,
-                        ) {
-                            let parent_value_id = finalized_defs[parent.index()];
-                            assert_ne!(parent_value_id, ValueId::INVALID);
-
-                            dependencies.push(Dependency {
-                                value: parent_value_id,
-                                source: BlockId(parent.index() as u32),
-                            });
-                        }
-                    }
-                },
-                &mut |_, _| {},
-            );
         }
+
+        let mut finalized_defs: Vec<[ValueId; Register64::COUNT]> =
+            vec![[ValueId::INVALID; Register64::COUNT]; flow.blocks.len()];
+
+        let mut enter = |def_stack: &mut DefStacks, node_id| {
+            let parent_def = def_stack.last().copied().expect("def_stack is never empty");
+            let mut last_def = parent_def;
+
+            let phis = blocks[node_id as usize]
+                .definitions
+                .iter()
+                .map(|&id| &definitions[id.index()])
+                .filter(|def| matches!(def.value, DefinitionValue::Phi { .. }));
+
+            // The node contains Phi for the selected register
+            for def in phis {
+                let DefinitionTarget::Register(reg) = def.target;
+                last_def[reg as usize] = def.id;
+            }
+
+            let block = &flow.blocks[node_id as usize];
+            let block_instructions = &info.instructions[block.span.range()];
+            let block_start = block.span.range().start as u32;
+
+            for (&instruction, i) in block_instructions.iter().zip(block_start..) {
+                let span = InstructionSpan::new(i, i + 1);
+
+                visit_assignment(instruction, &mut |target, def_value| {
+                    let value = next_value();
+                    values.push(Value {
+                        id: value,
+                        ty: ValueType::Register(target),
+                    });
+
+                    last_def[target as usize] = value;
+
+                    // FIXME: Missing the actual RHS
+                    let def_id = next_def();
+                    definitions.push(Definition {
+                        id: value,
+                        value: def_value,
+                        span,
+                        target: DefinitionTarget::Register(target),
+                    });
+
+                    blocks[node_id as usize].definitions.push(def_id);
+                });
+            }
+
+            def_stack.push(last_def);
+            finalized_defs[node_id as usize] = last_def;
+        };
+
+        let mut leave = |def_stack: &mut DefStacks, _| {
+            def_stack.pop();
+        };
+
+        iterative_dfs(&idom_inverse, 0, &mut def_stack, &mut enter, &mut leave);
+
+        iterative_dfs(
+            &idom_inverse,
+            0,
+            &mut (),
+            &mut |_, node_id| {
+                for &def_id in &blocks[node_id as usize].definitions {
+                    let defs = &mut definitions[def_id.index()];
+
+                    let DefinitionTarget::Register(phi_reg) = defs.target;
+                    let DefinitionValue::Phi { dependencies } = &mut defs.value else {
+                        break;
+                    };
+
+                    for parent in cfg.neighbors_directed(
+                        NodeIndex::new(node_id as usize),
+                        petgraph::Direction::Incoming,
+                    ) {
+                        let parent_value_id = finalized_defs[parent.index()];
+
+                        dependencies.push(Dependency {
+                            value: parent_value_id[phi_reg as usize],
+                            source: BlockId(parent.index() as u32),
+                        });
+                    }
+                }
+            },
+            &mut |_, _| {},
+        );
 
         Self {
             values,

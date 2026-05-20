@@ -4,8 +4,9 @@ use crate::{
         code_flow::{BlockId, FunctionCodeFlow, InstructionSpan},
         references::FunctionInfo,
         semantic::{
-            ArithmeticInstruction, ArithmeticOperands, ExtendedGpRegister, GpRegister, RegOrMemory,
-            Register64, Registers64, SemanticInstruction, SizedRegOrMemory,
+            ArithmeticInstruction, ArithmeticOperands, ExtendedGpRegister, GpRegister,
+            RegOrConst64, RegOrMemory, Register64, RegisterSliceKind, Registers64,
+            SemanticInstruction, SizedRegOrMemory,
         },
     },
 };
@@ -113,7 +114,7 @@ impl Ssa {
             let instructions = &info.instructions[block.span.range()];
 
             for &instruction in instructions {
-                visit_assignment(instruction, &mut |destination| {
+                visit_assignment(instruction, &mut |destination, _| {
                     def_sources[destination as usize].push(block_id);
                 });
             }
@@ -227,7 +228,7 @@ impl Ssa {
                 for (&instruction, i) in block_instructions.iter().zip(block_start..) {
                     let span = InstructionSpan::new(i, i + 1);
 
-                    visit_assignment(instruction, &mut |target| {
+                    visit_assignment(instruction, &mut |target, def_value| {
                         if target != reg {
                             return;
                         }
@@ -244,7 +245,7 @@ impl Ssa {
                         let def_id = next_def();
                         definitions.push(Definition {
                             id: value,
-                            value: DefinitionValue::Const(42),
+                            value: def_value,
                             span,
                             target: DefinitionTarget::Register(reg),
                         });
@@ -345,8 +346,18 @@ fn make_counter<T>(id: impl Fn(u32) -> T) -> impl FnMut() -> T {
     }
 }
 
-fn visit_assignment(instruction: SemanticInstruction, visit: &mut impl FnMut(Register64)) {
+fn visit_assignment(
+    instruction: SemanticInstruction,
+    visit: &mut impl FnMut(Register64, DefinitionValue),
+) {
     match instruction {
+        SemanticInstruction::Assignment {
+            destination,
+            source: RegOrConst64::Const(source),
+            slice: RegisterSliceKind::R64,
+        } => {
+            visit(destination, DefinitionValue::Const(source));
+        }
         SemanticInstruction::LoadAddress {
             destination: GpRegister {
                 full: destination, ..
@@ -421,7 +432,7 @@ fn visit_assignment(instruction: SemanticInstruction, visit: &mut impl FnMut(Reg
             },
             ..
         } => {
-            visit(destination);
+            visit(destination, DefinitionValue::Const(42));
         }
         SemanticInstruction::Exchange {
             first: RegOrMemory::Reg(first),
@@ -450,8 +461,8 @@ fn visit_assignment(instruction: SemanticInstruction, visit: &mut impl FnMut(Reg
                 },
             ..
         } => {
-            visit(first);
-            visit(second);
+            visit(first, DefinitionValue::Const(42));
+            visit(second, DefinitionValue::Const(42));
         }
         _ => (),
     }

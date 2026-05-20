@@ -157,10 +157,11 @@ fn main() {
             eprint!("    x{} = ", def.id.0);
 
             match &def.value {
-                DefinitionValue::External => eprintln!("external"),
-                DefinitionValue::Undefined => eprintln!("undefined"),
-                DefinitionValue::Const(c) => eprintln!("{c}"),
-                DefinitionValue::Value(_) | DefinitionValue::Add { .. } => eprintln!("..."),
+                DefinitionValue::External => eprint!("external"),
+                DefinitionValue::Undefined => eprint!("undefined"),
+                DefinitionValue::Const(c) => eprint!("{c}"),
+                DefinitionValue::Value(id) => eprint!("x{}", id.0),
+                DefinitionValue::Add { .. } => eprint!("..."),
                 DefinitionValue::Phi { dependencies } => {
                     eprint!("phi(");
 
@@ -172,8 +173,19 @@ fn main() {
                         eprint!(", x{}@b{}", dep.value.0, dep.source.index());
                     }
 
-                    eprintln!(")");
+                    eprint!(")");
                 }
+            }
+
+            let instructions = &info.instructions[def.span.range()];
+
+            match instructions {
+                [instruction] => {
+                    buf.clear();
+                    instruction.format(&mut formatter, &mut buf);
+                    eprintln!(" // {buf}");
+                }
+                _ => eprintln!(),
             }
         }
     }

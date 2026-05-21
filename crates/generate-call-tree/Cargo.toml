@@ -1,0 +1,16 @@
+[package]
+name = "generate-call-tree"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+goblin.workspace = true
+iced-x86.workspace = true
+elf-eater-analyzer.workspace = true
+smallvec.workspace = true
+petgraph.workspace = true
+clap.workspace = true

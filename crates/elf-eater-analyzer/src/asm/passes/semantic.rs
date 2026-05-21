@@ -147,7 +147,7 @@ impl SemanticInstruction {
                 destination,
                 source,
             } => {
-                let size = PointerSize::from(destination.slice_kind);
+                let size = PointerSize::from(destination.slice);
                 write!(buf, "mov {destination}, {size} {source}").unwrap();
             }
             &SemanticInstruction::LoadZeroExtend {
@@ -369,7 +369,7 @@ impl SizedRegOrMemory {
 
     pub fn size(&self) -> PointerSize {
         match self {
-            SizedRegOrMemory::Reg(reg) => reg.slice_kind.into(),
+            SizedRegOrMemory::Reg(reg) => reg.slice.into(),
             SizedRegOrMemory::Mem { size, expr: _ } => *size,
         }
     }
@@ -676,7 +676,7 @@ pub enum RegOrConst {
 impl RegOrConst {
     pub fn size(self) -> PointerSize {
         match self {
-            RegOrConst::Reg(reg) => reg.slice_kind.into(),
+            RegOrConst::Reg(reg) => reg.slice.into(),
             RegOrConst::Const { value: _, size } => size,
         }
     }
@@ -711,7 +711,7 @@ impl From<RegOrConst> for RegOrConst64 {
         match value {
             RegOrConst::Reg(GpRegister {
                 full: reg,
-                slice_kind: _,
+                slice: _,
             }) => Self::Reg(reg),
             RegOrConst::Const { value, size: _ } => Self::Const(value),
         }
@@ -751,7 +751,7 @@ impl From<GpRegister> for ExtendedGpRegister {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GpRegister {
     pub full: Register64,
-    pub slice_kind: RegisterSliceKind,
+    pub slice: RegisterSliceKind,
 }
 
 impl GpRegister {
@@ -768,7 +768,10 @@ impl GpRegister {
     pub const DL: Self = Self::new(Register64::Rdx, RegisterSliceKind::L8);
 
     pub const fn new(full: Register64, slice_kind: RegisterSliceKind) -> Self {
-        Self { full, slice_kind }
+        Self {
+            full,
+            slice: slice_kind,
+        }
     }
 
     pub const fn with_slice(self, slice_kind: RegisterSliceKind) -> Self {
@@ -776,7 +779,7 @@ impl GpRegister {
     }
 
     pub const fn as_str(self) -> &'static str {
-        match (self.full, self.slice_kind) {
+        match (self.full, self.slice) {
             (Register64::Rax, RegisterSliceKind::R64) => "reg_a",
             (Register64::Rax, RegisterSliceKind::R32) => "reg_a[32..]",
             (Register64::Rax, RegisterSliceKind::R16) => "reg_a[48..]",
@@ -867,7 +870,7 @@ impl TryFrom<Register> for GpRegister {
     fn try_from(value: Register) -> Result<Self, Self::Error> {
         Ok(Self {
             full: Register64::try_from(value)?,
-            slice_kind: RegisterSliceKind::try_from(value)?,
+            slice: RegisterSliceKind::try_from(value)?,
         })
     }
 }
@@ -1361,7 +1364,7 @@ fn lift_mov(instr: Instruction) -> Option<SemanticInstruction> {
             let source = lift_memory(&instr)?;
 
             // Zero extending 32-bit mov
-            if destination.slice_kind == RegisterSliceKind::R32 {
+            if destination.slice == RegisterSliceKind::R32 {
                 SemanticInstruction::LoadZeroExtend {
                     destination: destination.with_slice(RegisterSliceKind::R64),
                     source,
@@ -1386,14 +1389,10 @@ fn lift_mov(instr: Instruction) -> Option<SemanticInstruction> {
             | OpKind::Immediate8to32
             | OpKind::Immediate8to64
             | OpKind::Immediate32to64,
-        ) => {
-            let size = PointerSize::try_from(instr.memory_size()).ok()?;
-
-            SemanticInstruction::Store {
-                destination: lift_memory(&instr)?,
-                source: lift_reg_or_const(&instr, 1, size)?,
-            }
-        }
+        ) => SemanticInstruction::Store {
+            destination: lift_memory(&instr)?,
+            source: lift_reg_or_const(&instr, 1)?,
+        },
         (OpKind::Register, OpKind::Register) => {
             let slice = RegisterSliceKind::try_from(instr.op0_register()).ok()?;
             let destination = Register64::try_from(instr.op0_register()).ok()?;
@@ -1435,7 +1434,7 @@ fn lift_mov(instr: Instruction) -> Option<SemanticInstruction> {
             SemanticInstruction::Assignment {
                 slice,
                 destination: Register64::try_from(instr.op0_register()).ok()?,
-                source: RegOrConst64::Const(instr.immediate64()),
+                source: lift_reg_or_const(&instr, 1)?.into(),
             }
         }
         _ => return None,
@@ -1450,20 +1449,44 @@ fn lift_reg_or_mem(instr: &Instruction, op: u32) -> Option<RegOrMemory> {
     })
 }
 
-fn lift_reg_or_const(instr: &Instruction, op: u32, size: PointerSize) -> Option<RegOrConst> {
+fn lift_reg_or_const(instr: &Instruction, op: u32) -> Option<RegOrConst> {
     Some(match instr.op_kind(op) {
         OpKind::Register => RegOrConst::Reg(GpRegister::try_from(instr.op_register(op)).ok()?),
-        OpKind::Immediate8
-        | OpKind::Immediate16
-        | OpKind::Immediate32
-        | OpKind::Immediate64
-        | OpKind::Immediate8_2nd
-        | OpKind::Immediate8to16
-        | OpKind::Immediate8to32
-        | OpKind::Immediate8to64
-        | OpKind::Immediate32to64 => RegOrConst::Const {
+        OpKind::Immediate8 => RegOrConst::Const {
+            value: instr.immediate8() as u64,
+            size: PointerSize::Byte,
+        },
+        OpKind::Immediate16 => RegOrConst::Const {
+            value: instr.immediate16() as u64,
+            size: PointerSize::Word,
+        },
+        OpKind::Immediate32 => RegOrConst::Const {
+            value: instr.immediate32() as u64,
+            size: PointerSize::Dword,
+        },
+        OpKind::Immediate64 => RegOrConst::Const {
             value: instr.immediate64(),
-            size,
+            size: PointerSize::Qword,
+        },
+        OpKind::Immediate8_2nd => RegOrConst::Const {
+            value: instr.immediate8_2nd() as u64,
+            size: PointerSize::Byte,
+        },
+        OpKind::Immediate8to16 => RegOrConst::Const {
+            value: instr.immediate8to16() as u64,
+            size: PointerSize::Word,
+        },
+        OpKind::Immediate8to32 => RegOrConst::Const {
+            value: instr.immediate8to32() as u64,
+            size: PointerSize::Dword,
+        },
+        OpKind::Immediate8to64 => RegOrConst::Const {
+            value: instr.immediate8to64() as u64,
+            size: PointerSize::Qword,
+        },
+        OpKind::Immediate32to64 => RegOrConst::Const {
+            value: instr.immediate32to64() as u64,
+            size: PointerSize::Qword,
         },
         _ => return None,
     })
@@ -1473,15 +1496,15 @@ fn lift_operand(instr: &Instruction, op: u32) -> Option<Operand> {
     Some(match instr.op_kind(op) {
         OpKind::Register => Operand::Register(GpRegister::try_from(instr.op_register(op)).ok()?),
         OpKind::Memory => Operand::Memory(lift_memory(instr)?),
-        OpKind::Immediate8
-        | OpKind::Immediate16
-        | OpKind::Immediate32
-        | OpKind::Immediate64
-        | OpKind::Immediate8_2nd
-        | OpKind::Immediate8to16
-        | OpKind::Immediate8to32
-        | OpKind::Immediate8to64
-        | OpKind::Immediate32to64 => Operand::Const(instr.immediate64()),
+        OpKind::Immediate8 => Operand::Const(instr.immediate8() as u64),
+        OpKind::Immediate16 => Operand::Const(instr.immediate16() as u64),
+        OpKind::Immediate32 => Operand::Const(instr.immediate32() as u64),
+        OpKind::Immediate64 => Operand::Const(instr.immediate64()),
+        OpKind::Immediate8_2nd => Operand::Const(instr.immediate8_2nd() as u64),
+        OpKind::Immediate8to16 => Operand::Const(instr.immediate8to16() as u64),
+        OpKind::Immediate8to32 => Operand::Const(instr.immediate8to32() as u64),
+        OpKind::Immediate8to64 => Operand::Const(instr.immediate8to64() as u64),
+        OpKind::Immediate32to64 => Operand::Const(instr.immediate32to64() as u64),
         _ => return None,
     })
 }
@@ -1575,7 +1598,6 @@ fn lift_push(instr: Instruction) -> Option<SemanticInstruction> {
     }
 
     Some(SemanticInstruction::Push {
-        // BUG(hack3rmann): if it's immediate8, it must be **sign-extended** to full 64 bits
         operand: lift_operand(&instr, 0)?,
     })
 }

@@ -47,13 +47,15 @@ impl Display for ValueId {
 pub enum ValueType {
     Temporary,
     Register(Register64),
+    Memory,
 }
 
 impl Display for ValueType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ValueType::Temporary => f.write_str("tmp"),
-            ValueType::Register(reg) => reg.fmt(f),
+            Self::Temporary => f.write_str("tmp"),
+            Self::Register(reg) => reg.fmt(f),
+            Self::Memory => f.write_str("mem"),
         }
     }
 }
@@ -79,6 +81,7 @@ impl Display for Dependency {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AsmRef {
     Asm(RegOrConst64),
+    Memory,
     Ssa(ValueId),
 }
 
@@ -89,6 +92,12 @@ impl From<ValueSource> for AsmRef {
             ValueSource::Value(id) => AsmRef::Ssa(id),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AsmVarType {
+    Register(Register64),
+    Memory,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -102,10 +111,13 @@ pub enum AsmDefinitionValue {
 }
 
 impl AsmDefinitionValue {
-    pub fn resolve(self, resolve: impl Fn(Register64) -> ValueId) -> DefinitionValue {
-        let resolve = move |value: AsmRef| -> ValueSource {
+    pub fn resolve(self, resolve_var: impl Fn(AsmVarType) -> ValueId) -> DefinitionValue {
+        let resolve = |value: AsmRef| -> ValueSource {
             match value {
-                AsmRef::Asm(RegOrConst64::Reg(reg)) => ValueSource::Value(resolve(reg)),
+                AsmRef::Asm(RegOrConst64::Reg(reg)) => {
+                    ValueSource::Value(resolve_var(AsmVarType::Register(reg)))
+                }
+                AsmRef::Memory => ValueSource::Value(resolve_var(AsmVarType::Memory)),
                 AsmRef::Asm(RegOrConst64::Const(c)) => ValueSource::Const(c),
                 AsmRef::Ssa(id) => ValueSource::Value(id),
             }
@@ -126,9 +138,11 @@ impl AsmDefinitionValue {
                 right: resolve(right),
             },
             Self::Load { address } => DefinitionValue::Load {
+                memory: resolve_var(AsmVarType::Memory),
                 address: resolve(address),
             },
             Self::Store { address, value } => DefinitionValue::Store {
+                memory: resolve_var(AsmVarType::Memory),
                 address: resolve(address),
                 value: resolve(value),
             },
@@ -145,8 +159,8 @@ pub enum ValueSource {
 impl Display for ValueSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ValueSource::Const(c) => c.fmt(f),
-            ValueSource::Value(id) => id.fmt(f),
+            Self::Const(c) => c.fmt(f),
+            Self::Value(id) => id.fmt(f),
         }
     }
 }
@@ -170,9 +184,11 @@ pub enum DefinitionValue {
         right: ValueSource,
     },
     Load {
+        memory: ValueId,
         address: ValueSource,
     },
     Store {
+        memory: ValueId,
         address: ValueSource,
         value: ValueSource,
     },
@@ -190,17 +206,23 @@ impl Display for DefinitionValue {
             DefinitionValue::Add { left, right } => write!(f, "add({left}, {right})"),
             DefinitionValue::Sub { left, right } => write!(f, "sub({left}, {right})"),
             DefinitionValue::Mul { left, right } => write!(f, "mul({left}, {right})"),
-            DefinitionValue::Load { address } => write!(f, "load({address})"),
-            DefinitionValue::Store { address, value } => write!(f, "store({address}, {value})"),
+            DefinitionValue::Load { memory, address } => write!(f, "load({memory}, {address})"),
+            DefinitionValue::Store {
+                memory,
+                address,
+                value,
+            } => write!(f, "store({memory}, {address}, {value})"),
             DefinitionValue::Phi { dependencies } => {
                 f.write_str("phi(")?;
 
-                for dep in &dependencies[..1] {
-                    dep.fmt(f)?;
-                }
+                if !dependencies.is_empty() {
+                    for dep in &dependencies[..1] {
+                        dep.fmt(f)?;
+                    }
 
-                for dep in &dependencies[1..] {
-                    write!(f, ", {dep}")?;
+                    for dep in &dependencies[1..] {
+                        write!(f, ", {dep}")?;
+                    }
                 }
 
                 f.write_str(")")
@@ -249,7 +271,10 @@ impl Ssa {
         let dom_tree = dominators::simple_fast(&cfg, NodeIndex::new(0));
         let dom_frontier = algo::dominance_frontiers(&cfg, &dom_tree);
 
-        let mut def_sources: [_; Register64::COUNT] =
+        const VARIABLE_COUNT: usize = Register64::COUNT + 1;
+        const VAR_MEMORY: usize = Register64::COUNT;
+
+        let mut def_sources: [_; VARIABLE_COUNT] =
             array::from_fn(|_| SmallVec::<[BlockId; 12]>::new_const());
 
         for (block_id, block) in flow.blocks() {
@@ -257,17 +282,33 @@ impl Ssa {
 
             for &instruction in instructions {
                 visit_assignment(instruction, &mut |destination, _| {
-                    let AsmVisitTarget::Register(reg) = destination else {
-                        return ValueId::INVALID;
-                    };
+                    match destination {
+                        AsmVisitTarget::NewValue => {}
+                        AsmVisitTarget::Memory => {
+                            def_sources[VAR_MEMORY].push(block_id);
+                        }
+                        AsmVisitTarget::Register(reg) => {
+                            def_sources[reg as usize].push(block_id);
+                        }
+                    }
 
-                    def_sources[reg as usize].push(block_id);
                     ValueId::INVALID
                 });
             }
         }
 
-        let mut phi_needed = vec![Registers64::empty(); flow.blocks.len()];
+        #[derive(Clone, Copy)]
+        struct PhiTarget {
+            pub registers: Registers64,
+            pub has_memory: bool,
+        }
+
+        const PHI_TARGET_EMPTY: PhiTarget = PhiTarget {
+            registers: Registers64::empty(),
+            has_memory: false,
+        };
+
+        let mut phi_needed = vec![PHI_TARGET_EMPTY; flow.blocks.len()];
         let mut extended_def = Vec::new();
 
         for reg in Register64::ALL {
@@ -275,14 +316,30 @@ impl Ssa {
             extended_def.extend_from_slice(&def_sources[reg as usize]);
 
             while let Some(def_block) = extended_def.pop() {
-                for join in &dom_frontier[def_block.0 as usize] {
+                for &join in &dom_frontier[def_block.index()] {
                     let block_id = BlockId(join.index() as u32);
-                    let bits = &mut phi_needed[block_id.index()];
+                    let bits = &mut phi_needed[block_id.index()].registers;
 
                     if !bits.contains(reg.into()) {
                         bits.insert(reg.into());
                         extended_def.push(block_id);
                     }
+                }
+            }
+        }
+
+        // Memory pass
+        extended_def.clear();
+        extended_def.extend_from_slice(&def_sources[VAR_MEMORY]);
+
+        while let Some(def_block) = extended_def.pop() {
+            for &join in &dom_frontier[def_block.index()] {
+                let block_id = BlockId(join.index() as u32);
+                let has_memory = &mut phi_needed[block_id.index()].has_memory;
+
+                if !*has_memory {
+                    *has_memory = true;
+                    extended_def.push(block_id);
                 }
             }
         }
@@ -294,21 +351,21 @@ impl Ssa {
         let mut next_value = make_counter(ValueId);
         let mut next_def = make_counter(DefinitionId);
 
-        for (block_index, &regs) in phi_needed.iter().enumerate() {
-            for reg in regs {
-                let Some(reg) = reg.single() else {
-                    unreachable!();
-                };
+        for (block_index, &targets) in phi_needed.iter().enumerate() {
+            let targets = targets
+                .registers
+                .iter()
+                .flat_map(Registers64::single)
+                .map(ValueType::Register)
+                .chain(targets.has_memory.then_some(ValueType::Memory));
 
-                let value = next_value();
-                values.push(Value {
-                    id: value,
-                    ty: ValueType::Register(reg),
-                });
+            for ty in targets {
+                let id = next_value();
+                values.push(Value { id, ty });
 
                 let def_id = next_def();
                 definitions.push(Definition {
-                    id: value,
+                    id,
                     value: DefinitionValue::Phi {
                         dependencies: smallvec![],
                     },
@@ -329,18 +386,24 @@ impl Ssa {
             idom_inverse[dom_id.index()].push(index.index() as u32);
         }
 
-        type DefStacks = Vec<[ValueId; Register64::COUNT]>;
+        type DefStacks = Vec<[ValueId; VARIABLE_COUNT]>;
 
-        let mut def_stack: DefStacks = vec![[ValueId::INVALID; Register64::COUNT]];
+        let mut def_stack: DefStacks = vec![[ValueId::INVALID; VARIABLE_COUNT]];
 
-        for reg in Register64::ALL {
+        let variables = Register64::ALL
+            .into_iter()
+            .map(|reg| (reg as usize, reg))
+            .map(|(i, reg)| (i, ValueType::Register(reg)))
+            .chain([(VAR_MEMORY, ValueType::Memory)]);
+
+        for (var_index, ty) in variables {
             let root_value_id = next_value();
             values.push(Value {
                 id: root_value_id,
-                ty: ValueType::Register(reg),
+                ty,
             });
 
-            def_stack[0][reg as usize] = root_value_id;
+            def_stack[0][var_index] = root_value_id;
 
             let def_id = next_def();
             definitions.push(Definition {
@@ -354,8 +417,8 @@ impl Ssa {
             }
         }
 
-        let mut finalized_defs: Vec<[ValueId; Register64::COUNT]> =
-            vec![[ValueId::INVALID; Register64::COUNT]; flow.blocks.len()];
+        let mut finalized_defs: Vec<[ValueId; VARIABLE_COUNT]> =
+            vec![[ValueId::INVALID; VARIABLE_COUNT]; flow.blocks.len()];
 
         let mut enter = |def_stack: &mut DefStacks, node_id| {
             let parent_def = def_stack.last().copied().expect("def_stack is never empty");
@@ -371,11 +434,13 @@ impl Ssa {
             for def in phis {
                 let value = values[def.id.0 as usize];
 
-                let ValueType::Register(reg) = value.ty else {
-                    continue;
+                let var_index = match value.ty {
+                    ValueType::Temporary => continue,
+                    ValueType::Register(reg) => reg as usize,
+                    ValueType::Memory => VAR_MEMORY,
                 };
 
-                last_def[reg as usize] = def.id;
+                last_def[var_index] = def.id;
             }
 
             let block = &flow.blocks[node_id as usize];
@@ -388,6 +453,7 @@ impl Ssa {
                 visit_assignment(instruction, &mut |target, def_value| {
                     let value_type = match target {
                         AsmVisitTarget::NewValue => ValueType::Temporary,
+                        AsmVisitTarget::Memory => ValueType::Memory,
                         AsmVisitTarget::Register(reg) => ValueType::Register(reg),
                     };
 
@@ -397,17 +463,25 @@ impl Ssa {
                         ty: value_type,
                     });
 
-                    // FIXME: Missing the actual RHS
                     let def_id = next_def();
                     definitions.push(Definition {
                         id: value_id,
-                        value: def_value.resolve(|reg| last_def[reg as usize]),
+                        value: def_value.resolve(|var| match var {
+                            AsmVarType::Register(reg) => last_def[reg as usize],
+                            AsmVarType::Memory => last_def[VAR_MEMORY],
+                        }),
                         span,
                     });
 
                     // Update the last definition only after name resolution
-                    if let AsmVisitTarget::Register(reg) = target {
-                        last_def[reg as usize] = value_id;
+                    match target {
+                        AsmVisitTarget::Memory => {
+                            last_def[VAR_MEMORY] = value_id;
+                        }
+                        AsmVisitTarget::Register(reg) => {
+                            last_def[reg as usize] = value_id;
+                        }
+                        AsmVisitTarget::NewValue => {}
                     }
 
                     blocks[node_id as usize].definitions.push(def_id);
@@ -436,8 +510,10 @@ impl Ssa {
                     let value = values[defs.id.0 as usize];
 
                     // Break, because first 0..N definitions are always phi entries for registers
-                    let ValueType::Register(phi_reg) = value.ty else {
-                        break;
+                    let var_index = match value.ty {
+                        ValueType::Register(reg) => reg as usize,
+                        ValueType::Memory => VAR_MEMORY,
+                        ValueType::Temporary => break,
                     };
                     let DefinitionValue::Phi { dependencies } = &mut defs.value else {
                         break;
@@ -450,7 +526,7 @@ impl Ssa {
                         let parent_value_id = finalized_defs[parent.index()];
 
                         dependencies.push(Dependency {
-                            value: parent_value_id[phi_reg as usize],
+                            value: parent_value_id[var_index],
                             source: BlockId(parent.index() as u32),
                         });
                     }
@@ -508,6 +584,7 @@ fn make_counter<T>(id: impl Fn(u32) -> T) -> impl FnMut() -> T {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AsmVisitTarget {
     NewValue,
+    Memory,
     Register(Register64),
 }
 
@@ -704,7 +781,7 @@ fn visit_assignment(
             let address = visit_memory_expr(destination, AsmVisitTarget::NewValue, visit);
 
             visit(
-                AsmVisitTarget::NewValue,
+                AsmVisitTarget::Memory,
                 AsmDefinitionValue::Store {
                     address: AsmRef::from(address),
                     value: AsmRef::Asm(source),
@@ -750,7 +827,7 @@ fn visit_assignment(
             );
 
             visit(
-                AsmVisitTarget::NewValue,
+                AsmVisitTarget::Memory,
                 AsmDefinitionValue::Store {
                     address: AsmRef::Ssa(new_sp),
                     value,
@@ -815,7 +892,7 @@ fn visit_assignment(
                     let address = visit_memory_expr(expr, AsmVisitTarget::NewValue, visit);
 
                     visit(
-                        AsmVisitTarget::NewValue,
+                        AsmVisitTarget::Memory,
                         AsmDefinitionValue::Store {
                             address: address.into(),
                             value: AsmRef::Ssa(loaded_tmp),

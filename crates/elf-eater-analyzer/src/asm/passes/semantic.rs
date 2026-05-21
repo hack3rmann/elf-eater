@@ -1424,11 +1424,20 @@ fn lift_mov(instr: Instruction) -> Option<SemanticInstruction> {
             | OpKind::Immediate8to32
             | OpKind::Immediate8to64
             | OpKind::Immediate32to64,
-        ) => SemanticInstruction::Assignment {
-            slice: RegisterSliceKind::try_from(instr.op0_register()).ok()?,
-            destination: Register64::try_from(instr.op0_register()).ok()?,
-            source: RegOrConst64::Const(instr.immediate64()),
-        },
+        ) => {
+            let mut slice = RegisterSliceKind::try_from(instr.op0_register()).ok()?;
+
+            // Zero extending 32-bit mov
+            if slice == RegisterSliceKind::R32 {
+                slice = RegisterSliceKind::R64;
+            }
+
+            SemanticInstruction::Assignment {
+                slice,
+                destination: Register64::try_from(instr.op0_register()).ok()?,
+                source: RegOrConst64::Const(instr.immediate64()),
+            }
+        }
         _ => return None,
     })
 }

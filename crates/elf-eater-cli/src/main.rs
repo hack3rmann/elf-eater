@@ -2,12 +2,12 @@ use elf_eater_analyzer::{
     asm::passes::{
         code_flow::{BlockId, CodeBlockTerminator, FunctionCodeFlow},
         references::{FunctionLuts, ReferencingInstruction},
-        semantic::{ArithmeticInstruction, ArithmeticOpKind, SemanticInstruction},
+        semantic::{RegisterSliceKind, SemanticInstruction},
     },
     context::DisassemblerContext,
     ir::reg_ssa::Ssa,
 };
-use iced_x86::{Mnemonic, NasmFormatter};
+use iced_x86::NasmFormatter;
 use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
     sync::Arc,
@@ -67,22 +67,26 @@ fn walk_references(
     }
 }
 
-fn _find_instruction(luts: &FunctionLuts) -> Option<&str> {
+#[allow(unused)]
+fn find_instruction(luts: &FunctionLuts) -> Option<&str> {
     for (name, &address) in &luts.name_map {
         let Some(info) = luts.infos.get(&address) else {
             continue;
         };
 
-        let div = info.instructions.iter().find(|instr| match instr {
-            SemanticInstruction::Arithmetic(ArithmeticInstruction {
-                kind: ArithmeticOpKind::Idiv,
-                ..
-            }) => true,
-            SemanticInstruction::Other(instruction) => {
-                matches!(instruction.mnemonic(), Mnemonic::Idiv)
-            }
-            _ => false,
+        let div = info.instructions.iter().find(|instr| {
+            matches!(
+                instr,
+                SemanticInstruction::Assignment {
+                    slice: RegisterSliceKind::R16 | RegisterSliceKind::H8 | RegisterSliceKind::L8,
+                    ..
+                }
+            )
         });
+
+        if name == "skgvm_detect_vmware" {
+            continue;
+        }
 
         if div.is_some() {
             return Some(name);
@@ -94,21 +98,25 @@ fn _find_instruction(luts: &FunctionLuts) -> Option<&str> {
 
 fn main() {
     let ctx = DisassemblerContext::read("/home/hack3rmann/Downloads/libclntsh.so.12.1.0");
-    let function_luts = FunctionLuts::new(&ctx);
+    let luts = FunctionLuts::new(&ctx);
+
+    // let name = find_instruction(&luts).unwrap();
+    // panic!("{name}");
 
     // let name = "kgumini";
     // let name = "qctdccso";
-    let name = "kguudltr";
-    // let name = "Java_oracle_streams_XStreamIn_XStreamInAttachNative"; // has div
+    // let name = "kguudltr";
+    let name = "Java_oracle_streams_XStreamIn_XStreamInAttachNative"; // has div
     // let name = "kghfnd"; // has imul
     // let name = "dbgtbUpdateBucketUtil"; // has idiv
-    let sym_va = function_luts.name_map[name];
-    let info = &function_luts.infos[&sym_va];
+    // let name = "skgvm_detect_vmware";
+    let sym_va = luts.name_map[name];
+    let info = &luts.infos[&sym_va];
 
     let mut formatter = NasmFormatter::new();
     let mut buf = String::new();
 
-    let code_flow = FunctionCodeFlow::new(&function_luts, sym_va);
+    let code_flow = FunctionCodeFlow::new(&luts, sym_va);
 
     println!("fn {name} {{");
 
@@ -148,13 +156,13 @@ fn main() {
     let ssa = Ssa::build(&code_flow, info);
 
     for (i, block) in ssa.blocks.iter().enumerate() {
-        eprintln!("b{i}:");
+        println!("b{i}:");
 
         for &def_id in &block.definitions {
             let def = &ssa.definitions[def_id.index()];
             let value = ssa.values[def.id.0 as usize];
 
-            eprint!("    let x{}: {} = {}", def.id.0, value.ty, def.value);
+            print!("    let x{}: {} = {}", def.id.0, value.ty, def.value);
 
             let instructions = &info.instructions[def.span.range()];
 
@@ -162,9 +170,9 @@ fn main() {
                 [instruction] => {
                     buf.clear();
                     instruction.format(&mut formatter, &mut buf);
-                    eprintln!(" // {buf}");
+                    println!(" // {buf}");
                 }
-                _ => eprintln!(),
+                _ => println!(),
             }
         }
 

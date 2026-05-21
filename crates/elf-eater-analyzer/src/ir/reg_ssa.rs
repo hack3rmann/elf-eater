@@ -5,8 +5,8 @@ use crate::{
         references::FunctionInfo,
         semantic::{
             ArithmeticInstruction, ArithmeticOperands, ExtendedGpRegister, GpRegister,
-            MemoryExpression, Operand, RegOrConst64, RegOrMemory, Register64, RegisterSliceKind,
-            Registers64, SemanticInstruction, SizedRegOrMemory,
+            MemoryExpression, Operand, PointerSize, RegOrConst, RegOrConst64, RegOrMemory,
+            Register64, RegisterSliceKind, Registers64, SemanticInstruction, SizedRegOrMemory,
         },
     },
 };
@@ -43,9 +43,60 @@ impl Display for ValueId {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ValueSize {
+    #[default]
+    U64 = 64,
+    U32 = 32,
+    U16 = 16,
+    U8 = 8,
+}
+
+impl ValueSize {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ValueSize::U64 => "64",
+            ValueSize::U32 => "32",
+            ValueSize::U16 => "16",
+            ValueSize::U8 => "8",
+        }
+    }
+}
+
+impl TryFrom<PointerSize> for ValueSize {
+    type Error = ();
+
+    fn try_from(value: PointerSize) -> Result<Self, Self::Error> {
+        Ok(match value {
+            PointerSize::Byte => Self::U8,
+            PointerSize::Word => Self::U16,
+            PointerSize::Dword => Self::U32,
+            PointerSize::Qword => Self::U64,
+            _ => return Err(()),
+        })
+    }
+}
+
+impl From<RegisterSliceKind> for ValueSize {
+    fn from(value: RegisterSliceKind) -> Self {
+        match value {
+            RegisterSliceKind::R64 => Self::U64,
+            RegisterSliceKind::R32 => Self::U32,
+            RegisterSliceKind::R16 => Self::U16,
+            RegisterSliceKind::H8 | RegisterSliceKind::L8 => Self::U8,
+        }
+    }
+}
+
+impl Display for ValueSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ValueType {
-    Temporary,
+    Temporary { size: ValueSize },
     Register(Register64),
     Memory,
 }
@@ -53,7 +104,7 @@ pub enum ValueType {
 impl Display for ValueType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Temporary => f.write_str("tmp"),
+            Self::Temporary { size } => write!(f, "tmp{}", *size as u8),
             Self::Register(reg) => reg.fmt(f),
             Self::Memory => f.write_str("mem"),
         }
@@ -100,14 +151,102 @@ pub enum AsmVarType {
     Memory,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BitPosition {
+    /// reg[32..64]
+    #[default]
+    From32To64,
+    /// reg[48..64]
+    From48To64,
+    /// reg[48..56]
+    From48To56,
+    /// reg[56..64]
+    From56To64,
+}
+
+impl BitPosition {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            BitPosition::From32To64 => "32..64",
+            BitPosition::From48To64 => "48..64",
+            BitPosition::From48To56 => "48..56",
+            BitPosition::From56To64 => "56..64",
+        }
+    }
+
+    pub const fn size(self) -> ValueSize {
+        match self {
+            BitPosition::From32To64 => ValueSize::U32,
+            BitPosition::From48To64 => ValueSize::U16,
+            BitPosition::From48To56 | BitPosition::From56To64 => ValueSize::U8,
+        }
+    }
+}
+
+impl TryFrom<RegisterSliceKind> for BitPosition {
+    type Error = ();
+
+    fn try_from(value: RegisterSliceKind) -> Result<Self, Self::Error> {
+        Ok(match value {
+            RegisterSliceKind::R32 => Self::From32To64,
+            RegisterSliceKind::R16 => Self::From48To64,
+            RegisterSliceKind::H8 => Self::From48To56,
+            RegisterSliceKind::L8 => Self::From56To64,
+            RegisterSliceKind::R64 => return Err(()),
+        })
+    }
+}
+
+impl From<BitPosition> for RegisterSliceKind {
+    fn from(value: BitPosition) -> Self {
+        match value {
+            BitPosition::From32To64 => Self::R32,
+            BitPosition::From48To64 => Self::R16,
+            BitPosition::From48To56 => Self::H8,
+            BitPosition::From56To64 => Self::L8,
+        }
+    }
+}
+
+impl Display for BitPosition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AsmDefinitionValue {
     Value(AsmRef),
-    Add { left: AsmRef, right: AsmRef },
-    Sub { left: AsmRef, right: AsmRef },
-    Mul { left: AsmRef, right: AsmRef },
-    Load { address: AsmRef },
-    Store { address: AsmRef, value: AsmRef },
+    Add {
+        left: AsmRef,
+        right: AsmRef,
+    },
+    Sub {
+        left: AsmRef,
+        right: AsmRef,
+    },
+    Mul {
+        left: AsmRef,
+        right: AsmRef,
+    },
+    Load {
+        size: ValueSize,
+        address: AsmRef,
+    },
+    Store {
+        size: ValueSize,
+        address: AsmRef,
+        value: AsmRef,
+    },
+    BitInsert {
+        destination: AsmRef,
+        source: AsmRef,
+        position: BitPosition,
+    },
+    BitCut {
+        value: AsmRef,
+        position: BitPosition,
+    },
 }
 
 impl AsmDefinitionValue {
@@ -137,14 +276,33 @@ impl AsmDefinitionValue {
                 left: resolve(left),
                 right: resolve(right),
             },
-            Self::Load { address } => DefinitionValue::Load {
+            Self::Load { address, size } => DefinitionValue::Load {
                 memory: resolve_var(AsmVarType::Memory),
                 address: resolve(address),
+                size,
             },
-            Self::Store { address, value } => DefinitionValue::Store {
+            Self::Store {
+                address,
+                value,
+                size,
+            } => DefinitionValue::Store {
                 memory: resolve_var(AsmVarType::Memory),
                 address: resolve(address),
                 value: resolve(value),
+                size,
+            },
+            Self::BitInsert {
+                destination,
+                source,
+                position,
+            } => DefinitionValue::BitInsert {
+                destination: resolve(destination),
+                source: resolve(source),
+                position,
+            },
+            Self::BitCut { value, position } => DefinitionValue::BitCut {
+                value: resolve(value),
+                position,
             },
         }
     }
@@ -184,16 +342,27 @@ pub enum DefinitionValue {
         right: ValueSource,
     },
     Load {
+        size: ValueSize,
         memory: ValueId,
         address: ValueSource,
     },
     Store {
+        size: ValueSize,
         memory: ValueId,
         address: ValueSource,
         value: ValueSource,
     },
+    BitInsert {
+        destination: ValueSource,
+        source: ValueSource,
+        position: BitPosition,
+    },
+    BitCut {
+        value: ValueSource,
+        position: BitPosition,
+    },
     Phi {
-        dependencies: SmallVec<[Dependency; 2]>,
+        dependencies: SmallVec<[Dependency; 3]>,
     },
 }
 
@@ -206,12 +375,23 @@ impl Display for DefinitionValue {
             DefinitionValue::Add { left, right } => write!(f, "add({left}, {right})"),
             DefinitionValue::Sub { left, right } => write!(f, "sub({left}, {right})"),
             DefinitionValue::Mul { left, right } => write!(f, "mul({left}, {right})"),
-            DefinitionValue::Load { memory, address } => write!(f, "load({memory}, {address})"),
+            DefinitionValue::Load {
+                memory,
+                address,
+                size,
+            } => write!(f, "load{size}({memory}, {address})"),
             DefinitionValue::Store {
+                size,
                 memory,
                 address,
                 value,
-            } => write!(f, "store({memory}, {address}, {value})"),
+            } => write!(f, "store{size}({memory}, {address}, {value})"),
+            DefinitionValue::BitInsert {
+                destination,
+                source,
+                position,
+            } => write!(f, "insert({destination}, {source}, {position})"),
+            DefinitionValue::BitCut { value, position } => write!(f, "cut({value}, {position})"),
             DefinitionValue::Phi { dependencies } => {
                 f.write_str("phi(")?;
 
@@ -283,7 +463,7 @@ impl Ssa {
             for &instruction in instructions {
                 visit_assignment(instruction, &mut |destination, _| {
                     match destination {
-                        AsmVisitTarget::NewValue => {}
+                        AsmVisitTarget::NewValue { size: _ } => {}
                         AsmVisitTarget::Memory => {
                             def_sources[VAR_MEMORY].push(block_id);
                         }
@@ -435,7 +615,7 @@ impl Ssa {
                 let value = values[def.id.0 as usize];
 
                 let var_index = match value.ty {
-                    ValueType::Temporary => continue,
+                    ValueType::Temporary { size: _ } => continue,
                     ValueType::Register(reg) => reg as usize,
                     ValueType::Memory => VAR_MEMORY,
                 };
@@ -452,7 +632,7 @@ impl Ssa {
 
                 visit_assignment(instruction, &mut |target, def_value| {
                     let value_type = match target {
-                        AsmVisitTarget::NewValue => ValueType::Temporary,
+                        AsmVisitTarget::NewValue { size } => ValueType::Temporary { size },
                         AsmVisitTarget::Memory => ValueType::Memory,
                         AsmVisitTarget::Register(reg) => ValueType::Register(reg),
                     };
@@ -481,7 +661,7 @@ impl Ssa {
                         AsmVisitTarget::Register(reg) => {
                             last_def[reg as usize] = value_id;
                         }
-                        AsmVisitTarget::NewValue => {}
+                        AsmVisitTarget::NewValue { size: _ } => {}
                     }
 
                     blocks[node_id as usize].definitions.push(def_id);
@@ -509,11 +689,11 @@ impl Ssa {
                     let defs = &mut definitions[def_id.index()];
                     let value = values[defs.id.0 as usize];
 
-                    // Break, because first 0..N definitions are always phi entries for registers
+                    // Break, because first 0..N definitions are always phi entries for variables
                     let var_index = match value.ty {
                         ValueType::Register(reg) => reg as usize,
                         ValueType::Memory => VAR_MEMORY,
-                        ValueType::Temporary => break,
+                        ValueType::Temporary { size: _ } => break,
                     };
                     let DefinitionValue::Phi { dependencies } = &mut defs.value else {
                         break;
@@ -583,7 +763,7 @@ fn make_counter<T>(id: impl Fn(u32) -> T) -> impl FnMut() -> T {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AsmVisitTarget {
-    NewValue,
+    NewValue { size: ValueSize },
     Memory,
     Register(Register64),
 }
@@ -601,7 +781,9 @@ fn visit_memory_expr(
             displacement,
         } => {
             let index_times_scale = visit(
-                AsmVisitTarget::NewValue,
+                AsmVisitTarget::NewValue {
+                    size: ValueSize::U64,
+                },
                 AsmDefinitionValue::Mul {
                     left: AsmRef::Asm(RegOrConst64::Reg(index)),
                     right: AsmRef::Asm(RegOrConst64::Const(scale as u64)),
@@ -609,7 +791,9 @@ fn visit_memory_expr(
             );
 
             let base_plus_scaled_index = visit(
-                AsmVisitTarget::NewValue,
+                AsmVisitTarget::NewValue {
+                    size: ValueSize::U64,
+                },
                 AsmDefinitionValue::Add {
                     left: AsmRef::Asm(RegOrConst64::Reg(base)),
                     right: AsmRef::Ssa(index_times_scale),
@@ -641,7 +825,10 @@ fn visit_memory_expr(
             displacement,
         } => {
             let index_times_scale = visit(
-                AsmVisitTarget::NewValue,
+                AsmVisitTarget::NewValue {
+                    size: ValueSize::U64,
+                },
+                // TODO(hack3rmann): don't emit mul(x, 1)
                 AsmDefinitionValue::Mul {
                     left: AsmRef::Asm(RegOrConst64::Reg(index)),
                     right: AsmRef::Asm(RegOrConst64::Const(scale as u64)),
@@ -736,40 +923,200 @@ fn visit_assignment(
                 AsmDefinitionValue::Value(AsmRef::Asm(source)),
             );
         }
-        SemanticInstruction::Exchange {
-            first: RegOrMemory::Reg(destination),
-            second: RegOrMemory::Reg(source),
-            ..
+        SemanticInstruction::Assignment {
+            destination,
+            source,
+            slice,
         } => {
+            let position = BitPosition::try_from(slice).expect("R64 variant is handled");
+
+            let source = match source {
+                RegOrConst64::Reg(reg) => AsmRef::Ssa(visit(
+                    AsmVisitTarget::NewValue {
+                        size: position.size(),
+                    },
+                    AsmDefinitionValue::BitCut {
+                        value: AsmRef::Asm(RegOrConst64::Reg(reg)),
+                        position,
+                    },
+                )),
+                RegOrConst64::Const(c) => AsmRef::Asm(RegOrConst64::Const(c)),
+            };
+
             visit(
                 AsmVisitTarget::Register(destination),
-                AsmDefinitionValue::Value(AsmRef::Asm(RegOrConst64::Reg(source))),
+                AsmDefinitionValue::BitInsert {
+                    destination: AsmRef::Asm(RegOrConst64::Reg(destination)),
+                    source,
+                    position,
+                },
+            );
+        }
+        // FIXME(hack3rmann): WRONG, must produce a temporary
+        SemanticInstruction::Exchange {
+            first: RegOrMemory::Reg(first),
+            second: RegOrMemory::Reg(second),
+            slice: RegisterSliceKind::R64,
+        } => {
+            // xchg A, B
+            //  =>
+            // tmp = A
+            // A = B
+            // B = tmp
+
+            let tmp = visit(
+                AsmVisitTarget::NewValue {
+                    size: ValueSize::U64,
+                },
+                AsmDefinitionValue::Value(AsmRef::Asm(RegOrConst64::Reg(first))),
+            );
+
+            visit(
+                AsmVisitTarget::Register(first),
+                AsmDefinitionValue::Value(AsmRef::Asm(RegOrConst64::Reg(second))),
+            );
+
+            visit(
+                AsmVisitTarget::Register(second),
+                AsmDefinitionValue::Value(AsmRef::Ssa(tmp)),
+            );
+        }
+        SemanticInstruction::Exchange {
+            first: RegOrMemory::Reg(first),
+            second: RegOrMemory::Reg(second),
+            slice,
+        } => {
+            // xchg A, B
+            //  =>
+            // a = cut(A, 32..64)
+            // b = cut(B, 32..64)
+            // A = insert(A, b, 32..64)
+            // B = insert(B, a, 32..64)
+
+            let position = BitPosition::try_from(slice).expect("R64 is handled");
+
+            let first_cut = visit(
+                AsmVisitTarget::NewValue {
+                    size: position.size(),
+                },
+                AsmDefinitionValue::BitCut {
+                    value: AsmRef::Asm(RegOrConst64::Reg(first)),
+                    position,
+                },
+            );
+
+            let second_cut = visit(
+                AsmVisitTarget::NewValue {
+                    size: position.size(),
+                },
+                AsmDefinitionValue::BitCut {
+                    value: AsmRef::Asm(RegOrConst64::Reg(second)),
+                    position,
+                },
+            );
+
+            visit(
+                AsmVisitTarget::Register(first),
+                AsmDefinitionValue::BitInsert {
+                    destination: AsmRef::Asm(RegOrConst64::Reg(first)),
+                    source: AsmRef::Ssa(second_cut),
+                    position,
+                },
+            );
+
+            visit(
+                AsmVisitTarget::Register(second),
+                AsmDefinitionValue::BitInsert {
+                    destination: AsmRef::Asm(RegOrConst64::Reg(second)),
+                    source: AsmRef::Ssa(first_cut),
+                    position,
+                },
             );
         }
         SemanticInstruction::LoadAddress {
             destination:
                 GpRegister {
                     full: destination,
-                    slice_kind: RegisterSliceKind::R64,
+                    slice: RegisterSliceKind::R64,
                 },
             expr,
         } => {
             visit_memory_expr(expr, AsmVisitTarget::Register(destination), visit);
         }
+        SemanticInstruction::LoadAddress {
+            destination:
+                GpRegister {
+                    full: destination,
+                    slice,
+                },
+            expr,
+        } => {
+            let position = BitPosition::try_from(slice).expect("R64 variant is handled");
+
+            let address = visit_memory_expr(
+                expr,
+                AsmVisitTarget::NewValue {
+                    size: ValueSize::U64,
+                },
+                visit,
+            );
+
+            visit(
+                AsmVisitTarget::Register(destination),
+                AsmDefinitionValue::BitInsert {
+                    destination: AsmRef::Asm(RegOrConst64::Reg(destination)),
+                    source: address.into(),
+                    position,
+                },
+            );
+        }
         SemanticInstruction::Load {
             destination:
                 GpRegister {
                     full: destination,
-                    slice_kind: RegisterSliceKind::R64,
+                    slice,
                 },
             source,
         } => {
-            let address = visit_memory_expr(source, AsmVisitTarget::NewValue, visit);
+            let address = visit_memory_expr(
+                source,
+                AsmVisitTarget::NewValue {
+                    size: ValueSize::U64,
+                },
+                visit,
+            );
+
+            let (value, position) = match BitPosition::try_from(slice) {
+                Ok(position) => (
+                    visit(
+                        AsmVisitTarget::NewValue {
+                            size: position.size(),
+                        },
+                        AsmDefinitionValue::Load {
+                            address: AsmRef::from(address),
+                            size: position.size(),
+                        },
+                    ),
+                    position,
+                ),
+                Err(()) => {
+                    visit(
+                        AsmVisitTarget::Register(destination),
+                        AsmDefinitionValue::Load {
+                            address: AsmRef::from(address),
+                            size: ValueSize::U64,
+                        },
+                    );
+                    return;
+                }
+            };
 
             visit(
                 AsmVisitTarget::Register(destination),
-                AsmDefinitionValue::Load {
-                    address: AsmRef::from(address),
+                AsmDefinitionValue::BitInsert {
+                    destination: AsmRef::Asm(RegOrConst64::Reg(destination)),
+                    source: AsmRef::Ssa(value),
+                    position,
                 },
             );
         }
@@ -777,43 +1124,129 @@ fn visit_assignment(
             destination,
             source,
         } => {
-            let source = RegOrConst64::from(source);
-            let address = visit_memory_expr(destination, AsmVisitTarget::NewValue, visit);
+            let address = visit_memory_expr(
+                destination,
+                AsmVisitTarget::NewValue {
+                    size: ValueSize::U64,
+                },
+                visit,
+            );
+
+            let (value, size) = match source {
+                RegOrConst::Reg(GpRegister {
+                    full: source,
+                    slice: RegisterSliceKind::R64,
+                }) => (AsmRef::Asm(RegOrConst64::Reg(source)), ValueSize::U64),
+                RegOrConst::Reg(GpRegister {
+                    full: source,
+                    slice,
+                }) => {
+                    let position = BitPosition::try_from(slice).expect("U64 is handled");
+
+                    let source = visit(
+                        AsmVisitTarget::NewValue {
+                            size: position.size(),
+                        },
+                        AsmDefinitionValue::BitCut {
+                            value: AsmRef::Asm(RegOrConst64::Reg(source)),
+                            position,
+                        },
+                    );
+
+                    (AsmRef::Ssa(source), position.size())
+                }
+                RegOrConst::Const { value, size } => {
+                    let Ok(size) = ValueSize::try_from(size) else {
+                        unimplemented!("store for {{t,xmm,ymm,zmm}}word")
+                    };
+
+                    (AsmRef::Asm(RegOrConst64::Const(value)), size)
+                }
+            };
 
             visit(
                 AsmVisitTarget::Memory,
                 AsmDefinitionValue::Store {
                     address: AsmRef::from(address),
-                    value: AsmRef::Asm(source),
+                    value,
+                    size,
                 },
             );
         }
         SemanticInstruction::Push { operand } => {
+            // push reg16
+            //  =>
+            // rsp -= 8
+            // slice = cut(reg64, 48..64)
+            // store16(rsp, slice)
+
             // FIXME(hack3rmann): register size
-            let value = match operand {
+            let (value, size) = match operand {
                 Operand::Register(GpRegister {
                     full: Register64::Rsp,
-                    ..
+                    slice,
                 }) => {
-                    let old_rsp = visit(
-                        AsmVisitTarget::NewValue,
-                        AsmDefinitionValue::Value(AsmRef::Asm(RegOrConst64::Reg(Register64::Rsp))),
-                    );
+                    let old_rsp = match BitPosition::try_from(slice) {
+                        Ok(position) => visit(
+                            AsmVisitTarget::NewValue {
+                                size: position.size(),
+                            },
+                            AsmDefinitionValue::BitCut {
+                                value: AsmRef::Asm(RegOrConst64::Reg(Register64::Rsp)),
+                                position,
+                            },
+                        ),
+                        Err(()) => visit(
+                            AsmVisitTarget::NewValue {
+                                size: ValueSize::U64,
+                            },
+                            AsmDefinitionValue::Value(AsmRef::Asm(RegOrConst64::Reg(
+                                Register64::Rsp,
+                            ))),
+                        ),
+                    };
 
-                    AsmRef::Ssa(old_rsp)
+                    (AsmRef::Ssa(old_rsp), ValueSize::from(slice))
                 }
-                Operand::Register(GpRegister { full, .. }) => AsmRef::Asm(RegOrConst64::Reg(full)),
-                Operand::Const(c) => AsmRef::Asm(RegOrConst64::Const(c)),
+                Operand::Register(GpRegister { full: reg, slice }) => {
+                    let value = match BitPosition::try_from(slice) {
+                        Ok(position) => AsmRef::Ssa(visit(
+                            AsmVisitTarget::NewValue {
+                                size: position.size(),
+                            },
+                            AsmDefinitionValue::BitCut {
+                                value: AsmRef::Asm(RegOrConst64::Reg(reg)),
+                                position,
+                            },
+                        )),
+                        Err(()) => AsmRef::Asm(RegOrConst64::Reg(reg)),
+                    };
+
+                    (value, ValueSize::from(slice))
+                }
+                Operand::Const(c) => (AsmRef::Asm(RegOrConst64::Const(c)), ValueSize::U64),
                 Operand::Memory(expr) => {
-                    let address = visit_memory_expr(expr, AsmVisitTarget::NewValue, visit);
+                    let address = visit_memory_expr(
+                        expr,
+                        AsmVisitTarget::NewValue {
+                            size: ValueSize::U64,
+                        },
+                        visit,
+                    );
                     let value = visit(
-                        AsmVisitTarget::NewValue,
+                        // FIXME(hack3rmann): use memory size
+                        AsmVisitTarget::NewValue {
+                            size: ValueSize::U64,
+                        },
+                        // FIXME(hack3rmann): use memory size
                         AsmDefinitionValue::Load {
+                            size: ValueSize::U64,
                             address: address.into(),
                         },
                     );
 
-                    AsmRef::Ssa(value)
+                    // FIXME(hack3rmann): this memory must be sized
+                    (AsmRef::Ssa(value), ValueSize::U64)
                 }
             };
 
@@ -830,6 +1263,7 @@ fn visit_assignment(
                 AsmVisitTarget::Memory,
                 AsmDefinitionValue::Store {
                     address: AsmRef::Ssa(new_sp),
+                    size,
                     value,
                 },
             );
@@ -845,6 +1279,8 @@ fn visit_assignment(
                     visit(
                         AsmVisitTarget::Register(Register64::Rsp),
                         AsmDefinitionValue::Load {
+                            // FIXME(hack3rmann): use memory size
+                            size: ValueSize::U64,
                             address: AsmRef::Asm(RegOrConst64::Reg(Register64::Rsp)),
                         },
                     );
@@ -856,6 +1292,8 @@ fn visit_assignment(
                     visit(
                         AsmVisitTarget::Register(reg),
                         AsmDefinitionValue::Load {
+                            // FIXME(hack3rmann): use memory size
+                            size: ValueSize::U64,
                             address: AsmRef::Asm(RegOrConst64::Reg(Register64::Rsp)),
                         },
                     );
@@ -875,8 +1313,13 @@ fn visit_assignment(
                 // _ = store(addr, tmp)
                 RegOrMemory::Mem(expr) => {
                     let loaded_tmp = visit(
-                        AsmVisitTarget::NewValue,
+                        // FIXME(hack3rmann): use memory size
+                        AsmVisitTarget::NewValue {
+                            size: ValueSize::U64,
+                        },
                         AsmDefinitionValue::Load {
+                            // FIXME(hack3rmann): use memory size
+                            size: ValueSize::U64,
                             address: AsmRef::Asm(RegOrConst64::Reg(Register64::Rsp)),
                         },
                     );
@@ -889,11 +1332,19 @@ fn visit_assignment(
                         },
                     );
 
-                    let address = visit_memory_expr(expr, AsmVisitTarget::NewValue, visit);
+                    let address = visit_memory_expr(
+                        expr,
+                        AsmVisitTarget::NewValue {
+                            size: ValueSize::U64,
+                        },
+                        visit,
+                    );
 
                     visit(
                         AsmVisitTarget::Memory,
                         AsmDefinitionValue::Store {
+                            // FIXME(hack3rmann): use memory size
+                            size: ValueSize::U64,
                             address: address.into(),
                             value: AsmRef::Ssa(loaded_tmp),
                         },
@@ -901,13 +1352,7 @@ fn visit_assignment(
                 }
             }
         }
-        SemanticInstruction::LoadAddress {
-            destination: GpRegister {
-                full: destination, ..
-            },
-            ..
-        }
-        | SemanticInstruction::Pop {
+        SemanticInstruction::Pop {
             operand: RegOrMemory::Reg(destination),
             ..
         }
@@ -933,13 +1378,6 @@ fn visit_assignment(
             second: RegOrMemory::Reg(destination),
             ..
         }
-        | SemanticInstruction::Load {
-            destination: GpRegister {
-                full: destination, ..
-            },
-            ..
-        }
-        | SemanticInstruction::Assignment { destination, .. }
         | SemanticInstruction::AssignmentSignExtend {
             destination:
                 ExtendedGpRegister {

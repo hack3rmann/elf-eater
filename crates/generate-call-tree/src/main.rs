@@ -4,7 +4,7 @@ use elf_eater_analyzer::{
     context::DisassemblerContext,
 };
 use std::{
-    collections::{HashMap, HashSet, hash_map::Entry},
+    collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
     path::PathBuf,
     sync::Arc,
 };
@@ -18,9 +18,59 @@ struct Args {
     /// Name of the function to build a tree for
     #[arg(short, long)]
     name: String,
+
+    /// Walk depth-first
+    #[arg(short, long, default_value_t = false)]
+    depth: bool,
 }
 
-fn walk_references(
+fn walk_references_breadth(
+    ctx: &DisassemblerContext,
+    luts: &FunctionLuts,
+    instruction_map: &mut HashMap<u64, Arc<[ReferencingInstruction]>>,
+    visited: &mut HashSet<u64>,
+    function_address: u64,
+    visit: &mut impl FnMut(&DisassemblerContext, &FunctionLuts, usize, u64),
+) {
+    let mut queue = VecDeque::from_iter([(function_address, 0)]);
+
+    while let Some((address, depth)) = queue.pop_front() {
+        visit(ctx, luts, depth, address);
+        visited.insert(address);
+
+        let instructions = Arc::clone(match instruction_map.entry(address) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let Some(instructions) = luts.resolve_references(ctx.elf(), address) else {
+                    continue;
+                };
+
+                entry.insert(instructions.into())
+            }
+        });
+
+        for &instruction in instructions.iter() {
+            if let ReferencingInstruction::FunctionCall {
+                virtual_address: next_address,
+            }
+            | ReferencingInstruction::PltFunctionCall {
+                actual_virtual_address: next_address,
+                plt_virtual_address: _,
+            } = instruction
+            {
+                if visited.contains(&next_address) {
+                    continue;
+                } else {
+                    visited.insert(next_address);
+                }
+
+                queue.push_back((next_address, depth + 1));
+            }
+        }
+    }
+}
+
+fn walk_references_depth(
     ctx: &DisassemblerContext,
     luts: &FunctionLuts,
     instruction_map: &mut HashMap<u64, Arc<[ReferencingInstruction]>>,
@@ -60,7 +110,7 @@ fn walk_references(
 
             func(ctx, luts, depth, function_virtual_address, virtual_address);
 
-            walk_references(
+            walk_references_depth(
                 ctx,
                 luts,
                 instruction_map,
@@ -81,22 +131,48 @@ fn main() {
 
     let oci_env_init_addr = function_luts.name_map[&args.name];
 
-    walk_references(
-        &ctx,
-        &function_luts,
-        &mut Default::default(),
-        &mut Default::default(),
-        oci_env_init_addr,
-        0,
-        &mut |ctx, _luts, depth, _parent_addr, self_addr| {
-            let sym = function_luts.symbol_map[&self_addr];
-            let name = sym.get_name(ctx.elf()).unwrap();
+    if args.depth {
+        walk_references_depth(
+            &ctx,
+            &function_luts,
+            &mut Default::default(),
+            &mut Default::default(),
+            oci_env_init_addr,
+            0,
+            &mut move |ctx, luts, depth, _parent_addr, self_addr| {
+                let sym = luts.symbol_map[&self_addr];
+                let name = sym.get_name(ctx.elf()).unwrap();
 
-            for _ in 0..depth {
-                print!(" ");
-            }
+                for _ in 0..depth {
+                    print!(" ");
+                }
 
-            println!("{name}");
-        },
-    );
+                println!("{name}");
+            },
+        );
+    } else {
+        let mut last_depth = 0;
+
+        walk_references_breadth(
+            &ctx,
+            &function_luts,
+            &mut Default::default(),
+            &mut Default::default(),
+            oci_env_init_addr,
+            &mut move |ctx, luts, depth, self_addr| {
+                if last_depth != depth {
+                    println!("-----------------------------------------------");
+                    println!("- depth = {depth}");
+                    println!("-----------------------------------------------");
+
+                    last_depth = depth;
+                }
+
+                let sym = luts.symbol_map[&self_addr];
+                let name = sym.get_name(ctx.elf()).unwrap();
+
+                println!("{name}");
+            },
+        );
+    }
 }

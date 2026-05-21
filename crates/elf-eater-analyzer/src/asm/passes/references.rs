@@ -20,7 +20,7 @@ pub enum FunctionSymLocation {
     DynSym,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ReferencingInstruction {
     /// Referencing a named function with stored info
     FunctionCall { virtual_address: u64 },

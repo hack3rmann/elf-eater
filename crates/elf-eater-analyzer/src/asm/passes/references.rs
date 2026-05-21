@@ -97,6 +97,17 @@ pub struct SymExt {
     pub ty: SymType,
 }
 
+impl SymExt {
+    pub fn get_name<'s>(self, elf: &Elf<'s>) -> Option<&'s str> {
+        let strtab = match self.ty {
+            SymType::Regular => &elf.strtab,
+            SymType::Dyn => &elf.dynstrtab,
+        };
+
+        strtab.get_at(self.sym.st_name)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FunctionInfo {
     pub instructions: Vec<SemanticInstruction>,
@@ -205,8 +216,8 @@ impl FunctionLuts {
             let fn_end = fn_start + 16;
             let bytes = &ctx.bytes()[fn_start..fn_end];
 
-            let info = FunctionInfo::decode_function(sym.st_value, bytes);
-            infos.insert(sym.st_value, info);
+            let info = FunctionInfo::decode_function(plt_va, bytes);
+            infos.insert(plt_va, info);
         }
 
         Self {

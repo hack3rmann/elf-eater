@@ -208,6 +208,19 @@ impl From<BitPosition> for RegisterSliceKind {
     }
 }
 
+impl TryFrom<ValueSize> for BitPosition {
+    type Error = ();
+
+    fn try_from(value: ValueSize) -> Result<Self, Self::Error> {
+        Ok(match value {
+            ValueSize::U32 => Self::From32To64,
+            ValueSize::U16 => Self::From48To64,
+            ValueSize::U8 => Self::From56To64,
+            ValueSize::U64 => return Err(()),
+        })
+    }
+}
+
 impl Display for BitPosition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -308,7 +321,7 @@ impl AsmDefinitionValue {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ValueSource {
     Const(u64),
     Value(ValueId),
@@ -952,7 +965,6 @@ fn visit_assignment(
                 },
             );
         }
-        // FIXME(hack3rmann): WRONG, must produce a temporary
         SemanticInstruction::Exchange {
             first: RegOrMemory::Reg(first),
             second: RegOrMemory::Reg(second),
@@ -1033,6 +1045,96 @@ fn visit_assignment(
                 },
             );
         }
+        SemanticInstruction::Exchange {
+            first: RegOrMemory::Mem(mem),
+            second: RegOrMemory::Reg(reg),
+            slice,
+        }
+        | SemanticInstruction::Exchange {
+            first: RegOrMemory::Reg(reg),
+            second: RegOrMemory::Mem(mem),
+            slice,
+        } => {
+            // xchg reg16, qword [mem]
+            //  =>
+            // address = { mem }
+            // value = load16(address)
+            // reg_slice = cut(regN, 48..64)
+            // store16(address, reg_slice)
+            // reg16 = insert(reg64, value, 48..64)
+
+            let address = visit_memory_expr(
+                mem,
+                AsmVisitTarget::NewValue {
+                    size: ValueSize::U64,
+                },
+                visit,
+            );
+
+            let size = ValueSize::from(slice);
+
+            let value = visit(
+                AsmVisitTarget::NewValue { size },
+                AsmDefinitionValue::Load {
+                    size,
+                    address: address.into(),
+                },
+            );
+
+            let reg_slice = match BitPosition::try_from(slice) {
+                Ok(position) => {
+                    let reg_slice = visit(
+                        AsmVisitTarget::NewValue { size },
+                        AsmDefinitionValue::BitCut {
+                            value: AsmRef::Asm(RegOrConst64::Reg(reg)),
+                            position,
+                        },
+                    );
+                    AsmRef::Ssa(reg_slice)
+                }
+                Err(()) => AsmRef::Asm(RegOrConst64::Reg(reg)),
+            };
+
+            visit(
+                AsmVisitTarget::Memory,
+                AsmDefinitionValue::Store {
+                    size,
+                    address: address.into(),
+                    value: reg_slice,
+                },
+            );
+
+            match BitPosition::try_from(slice) {
+                Err(()) => visit(
+                    AsmVisitTarget::Register(reg),
+                    AsmDefinitionValue::Value(AsmRef::Ssa(value)),
+                ),
+                // NOTE(hack3rmann): zero-extends to reg64
+                Ok(position @ BitPosition::From32To64) => visit(
+                    AsmVisitTarget::Register(reg),
+                    AsmDefinitionValue::BitInsert {
+                        destination: AsmRef::Asm(RegOrConst64::Const(0)),
+                        source: AsmRef::Ssa(value),
+                        position,
+                    },
+                ),
+                Ok(position) => visit(
+                    AsmVisitTarget::Register(reg),
+                    AsmDefinitionValue::BitInsert {
+                        destination: AsmRef::Asm(RegOrConst64::Reg(reg)),
+                        source: AsmRef::Ssa(value),
+                        position,
+                    },
+                ),
+            };
+        }
+        SemanticInstruction::Exchange {
+            first: RegOrMemory::Mem(_),
+            second: RegOrMemory::Mem(_),
+            slice: _,
+        } => {
+            unimplemented!("unimplemented `xchg mem, mem`")
+        }
         SemanticInstruction::LoadAddress {
             destination:
                 GpRegister {
@@ -1043,15 +1145,9 @@ fn visit_assignment(
         } => {
             visit_memory_expr(expr, AsmVisitTarget::Register(destination), visit);
         }
-        SemanticInstruction::LoadAddress {
-            destination:
-                GpRegister {
-                    full: destination,
-                    slice,
-                },
-            expr,
-        } => {
-            let position = BitPosition::try_from(slice).expect("R64 variant is handled");
+        SemanticInstruction::LoadAddress { destination, expr } => {
+            let position =
+                BitPosition::try_from(destination.slice).expect("R64 variant is handled");
 
             let address = visit_memory_expr(
                 expr,
@@ -1062,20 +1158,16 @@ fn visit_assignment(
             );
 
             visit(
-                AsmVisitTarget::Register(destination),
+                AsmVisitTarget::Register(destination.full),
                 AsmDefinitionValue::BitInsert {
-                    destination: AsmRef::Asm(RegOrConst64::Reg(destination)),
+                    destination: AsmRef::Asm(RegOrConst64::Reg(destination.full)),
                     source: address.into(),
                     position,
                 },
             );
         }
         SemanticInstruction::Load {
-            destination:
-                GpRegister {
-                    full: destination,
-                    slice,
-                },
+            destination,
             source,
         } => {
             let address = visit_memory_expr(
@@ -1086,7 +1178,7 @@ fn visit_assignment(
                 visit,
             );
 
-            let (value, position) = match BitPosition::try_from(slice) {
+            let (value, position) = match BitPosition::try_from(destination.slice) {
                 Ok(position) => (
                     visit(
                         AsmVisitTarget::NewValue {
@@ -1101,7 +1193,7 @@ fn visit_assignment(
                 ),
                 Err(()) => {
                     visit(
-                        AsmVisitTarget::Register(destination),
+                        AsmVisitTarget::Register(destination.full),
                         AsmDefinitionValue::Load {
                             address: AsmRef::from(address),
                             size: ValueSize::U64,
@@ -1112,9 +1204,9 @@ fn visit_assignment(
             };
 
             visit(
-                AsmVisitTarget::Register(destination),
+                AsmVisitTarget::Register(destination.full),
                 AsmDefinitionValue::BitInsert {
-                    destination: AsmRef::Asm(RegOrConst64::Reg(destination)),
+                    destination: AsmRef::Asm(RegOrConst64::Reg(destination.full)),
                     source: AsmRef::Ssa(value),
                     position,
                 },
@@ -1268,25 +1360,65 @@ fn visit_assignment(
                 },
             );
         }
-        SemanticInstruction::Pop {
-            operand,
-            slice: RegisterSliceKind::R64,
-        } => {
+        SemanticInstruction::Pop { operand, slice } => {
             match operand {
                 // # OP is RSP
-                // rsp = load(rsp)
-                RegOrMemory::Reg(Register64::Rsp) => {
-                    visit(
-                        AsmVisitTarget::Register(Register64::Rsp),
-                        AsmDefinitionValue::Load {
-                            // FIXME(hack3rmann): use memory size
-                            size: ValueSize::U64,
-                            address: AsmRef::Asm(RegOrConst64::Reg(Register64::Rsp)),
-                        },
-                    );
-                }
+                // value = load16(rsp)
+                // rsp = insert(rsp, value, 48..64)
+                RegOrMemory::Reg(Register64::Rsp) => match BitPosition::try_from(slice) {
+                    Ok(position @ BitPosition::From32To64) => {
+                        let value = visit(
+                            AsmVisitTarget::NewValue {
+                                size: position.size(),
+                            },
+                            AsmDefinitionValue::Load {
+                                size: position.size(),
+                                address: AsmRef::Asm(RegOrConst64::Reg(Register64::Rsp)),
+                            },
+                        );
+
+                        visit(
+                            AsmVisitTarget::Register(Register64::Rsp),
+                            AsmDefinitionValue::BitInsert {
+                                destination: AsmRef::Asm(RegOrConst64::Const(0)),
+                                source: AsmRef::Ssa(value),
+                                position,
+                            },
+                        );
+                    }
+                    Ok(position) => {
+                        let value = visit(
+                            AsmVisitTarget::NewValue {
+                                size: position.size(),
+                            },
+                            AsmDefinitionValue::Load {
+                                size: position.size(),
+                                address: AsmRef::Asm(RegOrConst64::Reg(Register64::Rsp)),
+                            },
+                        );
+
+                        visit(
+                            AsmVisitTarget::Register(Register64::Rsp),
+                            AsmDefinitionValue::BitInsert {
+                                destination: AsmRef::Asm(RegOrConst64::Reg(Register64::Rsp)),
+                                source: AsmRef::Ssa(value),
+                                position,
+                            },
+                        );
+                    }
+                    Err(()) => {
+                        visit(
+                            AsmVisitTarget::Register(Register64::Rsp),
+                            AsmDefinitionValue::Load {
+                                size: ValueSize::from(slice),
+                                address: AsmRef::Asm(RegOrConst64::Reg(Register64::Rsp)),
+                            },
+                        );
+                    }
+                },
                 // # OP is register and not RSP
-                // op = load(rsp)
+                // value = load16(rsp)
+                // reg64 = insert(reg64, value, 48..64)
                 // rsp += 8
                 RegOrMemory::Reg(reg) => {
                     visit(
@@ -1352,30 +1484,143 @@ fn visit_assignment(
                 }
             }
         }
-        SemanticInstruction::Pop {
-            operand: RegOrMemory::Reg(destination),
-            ..
+        SemanticInstruction::LoadZeroExtend {
+            destination:
+                GpRegister {
+                    full: destination,
+                    slice: RegisterSliceKind::R32,
+                },
+            source,
+            source_size,
         }
         | SemanticInstruction::LoadZeroExtend {
+            destination:
+                GpRegister {
+                    full: destination,
+                    slice: RegisterSliceKind::R64,
+                },
+            source,
+            source_size,
+        } => {
+            // movzx reg32, any <=> movzx reg64, any
+            //  =>
+            // address = eval(mem)
+            // value = load8(address)
+            // reg64 = insert(0, value, 56..64)
+
+            let address = visit_memory_expr(
+                source,
+                AsmVisitTarget::NewValue {
+                    size: ValueSize::U64,
+                },
+                visit,
+            );
+
+            let Ok(size) = ValueSize::try_from(source_size) else {
+                unimplemented!()
+            };
+
+            let value = visit(
+                AsmVisitTarget::NewValue { size },
+                AsmDefinitionValue::Load {
+                    size,
+                    address: address.into(),
+                },
+            );
+
+            let Ok(position) = BitPosition::try_from(size) else {
+                unimplemented!("movzx reg64, {source_size} value");
+            };
+
+            visit(
+                AsmVisitTarget::Register(destination),
+                AsmDefinitionValue::BitInsert {
+                    destination: AsmRef::Asm(RegOrConst64::Const(0)),
+                    source: AsmRef::Ssa(value),
+                    position,
+                },
+            );
+        }
+        SemanticInstruction::LoadZeroExtend {
+            destination:
+                GpRegister {
+                    full: destination,
+                    slice: RegisterSliceKind::R16,
+                },
+            source,
+            source_size: PointerSize::Byte,
+        } => {
+            // movzx reg16, mem8
+            //  =>
+            // address = eval(mem)
+            // value = load8(address)
+            // tmp64 = insert(0, value, 56..64)
+            // tmp16 = cut(tmp64, 48..64)
+            // reg64 = insert(reg64, tmp16, 48..64)
+
+            let address = visit_memory_expr(
+                source,
+                AsmVisitTarget::NewValue {
+                    size: ValueSize::U64,
+                },
+                visit,
+            );
+
+            let value = visit(
+                AsmVisitTarget::NewValue {
+                    size: ValueSize::U8,
+                },
+                AsmDefinitionValue::Load {
+                    size: ValueSize::U8,
+                    address: address.into(),
+                },
+            );
+
+            let tmp64 = visit(
+                AsmVisitTarget::NewValue {
+                    size: ValueSize::U64,
+                },
+                AsmDefinitionValue::BitInsert {
+                    destination: AsmRef::Asm(RegOrConst64::Const(0)),
+                    source: AsmRef::Ssa(value),
+                    position: BitPosition::From56To64,
+                },
+            );
+
+            let tmp16 = visit(
+                AsmVisitTarget::NewValue {
+                    size: ValueSize::U16,
+                },
+                AsmDefinitionValue::BitCut {
+                    value: AsmRef::Ssa(tmp64),
+                    position: BitPosition::From48To64,
+                },
+            );
+
+            visit(
+                AsmVisitTarget::Register(destination),
+                AsmDefinitionValue::BitInsert {
+                    destination: AsmRef::Asm(RegOrConst64::Reg(destination)),
+                    source: AsmRef::Ssa(tmp16),
+                    position: BitPosition::From48To56,
+                },
+            );
+        }
+        SemanticInstruction::LoadZeroExtend {
+            destination:
+                GpRegister {
+                    full: _,
+                    slice: RegisterSliceKind::H8 | RegisterSliceKind::L8,
+                },
+            source: _,
+            source_size: _,
+        } => {
+            unimplemented!("movzx reg8, any")
+        }
+        SemanticInstruction::LoadSignExtend {
             destination: GpRegister {
                 full: destination, ..
             },
-            ..
-        }
-        | SemanticInstruction::LoadSignExtend {
-            destination: GpRegister {
-                full: destination, ..
-            },
-            ..
-        }
-        | SemanticInstruction::Exchange {
-            first: RegOrMemory::Reg(destination),
-            second: RegOrMemory::Mem(_),
-            ..
-        }
-        | SemanticInstruction::Exchange {
-            first: RegOrMemory::Mem(_),
-            second: RegOrMemory::Reg(destination),
             ..
         }
         | SemanticInstruction::AssignmentSignExtend {
@@ -1449,6 +1694,21 @@ fn visit_assignment(
                 AsmDefinitionValue::Value(AsmRef::Asm(RegOrConst64::Const(42))),
             );
         }
-        _ => (),
+        SemanticInstruction::DirectCall { .. }
+        | SemanticInstruction::IndirectCallReg { .. }
+        | SemanticInstruction::IndirectCallMem { .. }
+        | SemanticInstruction::Return
+        | SemanticInstruction::ReturnClear { .. }
+        | SemanticInstruction::DirectJump { .. }
+        | SemanticInstruction::IndirectJumpReg { .. }
+        | SemanticInstruction::IndirectJumpMem { .. }
+        | SemanticInstruction::ConditionalJump { .. }
+        | SemanticInstruction::Test { .. }
+        | SemanticInstruction::Cmp { .. }
+        | SemanticInstruction::Nop => {}
+        SemanticInstruction::Other(instruction) => {
+            eprintln!("unsupported instruction {instruction:?}");
+        }
+        _ => {}
     }
 }

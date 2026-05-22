@@ -1707,6 +1707,29 @@ fn visit_assignment(
                 },
             );
         }
+        SemanticInstruction::Leave => {
+            // leave
+            //  =>
+            // mov rsp, rbp
+            // pop rbp
+
+            visit_assignment(
+                SemanticInstruction::Assignment {
+                    slice: RegisterSliceKind::R64,
+                    destination: Register64::Rsp,
+                    source: RegOrConst64::Reg(Register64::Rsp),
+                },
+                visit,
+            );
+
+            visit_assignment(
+                SemanticInstruction::Pop {
+                    slice: RegisterSliceKind::R64,
+                    operand: RegOrMemory::Reg(Register64::Rbp),
+                },
+                visit,
+            );
+        }
         SemanticInstruction::LoadSignExtend {
             destination: GpRegister {
                 full: destination, ..

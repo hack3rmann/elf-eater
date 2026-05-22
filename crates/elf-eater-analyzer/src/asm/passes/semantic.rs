@@ -117,6 +117,7 @@ pub enum SemanticInstruction {
         slice: RegisterSliceKind,
         operand: RegOrMemory,
     },
+    Leave,
     /// No-op
     Nop,
     Arithmetic(ArithmeticInstruction),
@@ -259,6 +260,9 @@ impl SemanticInstruction {
                     write!(buf, "pop {mem}").unwrap();
                 }
             },
+            SemanticInstruction::Leave => {
+                buf.push_str("leave");
+            }
             SemanticInstruction::Arithmetic(instruction) => {
                 write!(buf, "{instruction}").unwrap();
             }
@@ -287,6 +291,7 @@ impl From<Instruction> for SemanticInstruction {
             .or_else(|| lift_test(instr))
             .or_else(|| lift_cmp(instr))
             .or_else(|| lift_arithmetic(instr))
+            .or_else(|| lift_leave(instr))
             .or_else(|| lift_nop(instr))
             .unwrap_or(SemanticInstruction::Other(instr))
     }
@@ -1617,6 +1622,10 @@ fn lift_pop(instr: Instruction) -> Option<SemanticInstruction> {
         slice,
         operand: lift_reg_or_mem(&instr, 0)?,
     })
+}
+
+fn lift_leave(instr: Instruction) -> Option<SemanticInstruction> {
+    (instr.mnemonic() == Mnemonic::Leave).then_some(SemanticInstruction::Leave)
 }
 
 fn lift_cmp(instr: Instruction) -> Option<SemanticInstruction> {

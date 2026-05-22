@@ -1617,6 +1617,96 @@ fn visit_assignment(
         } => {
             unimplemented!("movzx reg8, any")
         }
+        SemanticInstruction::AssignmentZeroExtend {
+            destination:
+                GpRegister {
+                    full: destination,
+                    slice: RegisterSliceKind::R64,
+                },
+            source,
+        } => {
+            // movzx a64, b16
+            //  =>
+            // value = cut(b, 48..64)
+            // a64 = insert(0, value, 48..64)
+
+            let position = BitPosition::try_from(source.slice).expect("source is less that U64");
+
+            let value = visit(
+                AsmVisitTarget::NewValue {
+                    size: ValueSize::from(source.slice),
+                },
+                AsmDefinitionValue::BitCut {
+                    value: AsmRef::Asm(RegOrConst64::Reg(source.full)),
+                    position,
+                },
+            );
+
+            visit(
+                AsmVisitTarget::Register(destination),
+                AsmDefinitionValue::BitInsert {
+                    destination: AsmRef::Asm(RegOrConst64::Const(0)),
+                    source: AsmRef::Ssa(value),
+                    position,
+                },
+            );
+        }
+        SemanticInstruction::AssignmentZeroExtend {
+            destination,
+            source,
+        } => {
+            // movzx a16, b8
+            //  =>
+            // tmp8 = cut(b, 56..64)
+            // tmp64 = insert(0, tmp8, 56..64)
+            // tmp16 = cut(tmp64, 48..64)
+            // a64 = insert(a64, tmp16, 48..64)
+
+            let destination_position =
+                BitPosition::try_from(destination.slice).expect("destination is less that U64");
+            let source_position =
+                BitPosition::try_from(source.slice).expect("source is less that U64");
+
+            let tmp8 = visit(
+                AsmVisitTarget::NewValue {
+                    size: ValueSize::from(source.slice),
+                },
+                AsmDefinitionValue::BitCut {
+                    value: AsmRef::Asm(RegOrConst64::Reg(source.full)),
+                    position: source_position,
+                },
+            );
+
+            let tmp64 = visit(
+                AsmVisitTarget::NewValue {
+                    size: ValueSize::U64,
+                },
+                AsmDefinitionValue::BitInsert {
+                    destination: AsmRef::Asm(RegOrConst64::Const(0)),
+                    source: AsmRef::Ssa(tmp8),
+                    position: source_position,
+                },
+            );
+
+            let tmp16 = visit(
+                AsmVisitTarget::NewValue {
+                    size: ValueSize::from(destination.slice),
+                },
+                AsmDefinitionValue::BitCut {
+                    value: AsmRef::Ssa(tmp64),
+                    position: destination_position,
+                },
+            );
+
+            visit(
+                AsmVisitTarget::Register(destination.full),
+                AsmDefinitionValue::BitInsert {
+                    destination: AsmRef::Asm(RegOrConst64::Reg(destination.full)),
+                    source: AsmRef::Ssa(tmp16),
+                    position: destination_position,
+                },
+            );
+        }
         SemanticInstruction::LoadSignExtend {
             destination: GpRegister {
                 full: destination, ..
@@ -1651,13 +1741,7 @@ fn visit_assignment(
                     ..
                 },
             ..
-        })
-        | SemanticInstruction::AssignmentZeroExtend {
-            destination: GpRegister {
-                full: destination, ..
-            },
-            ..
-        } => {
+        }) => {
             visit(
                 AsmVisitTarget::Register(destination),
                 AsmDefinitionValue::Value(AsmRef::Asm(RegOrConst64::Const(42))),
